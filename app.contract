@@ -1,0 +1,320 @@
+// Exalt: open audiobooks. Every book is one record (an Open Library work); anyone can upload
+// an EPUB, PDF or TXT of it and make an audiobook with the voice model they choose, which
+// then sits on that book's page for everyone. app.ts asks server/index.ts for all of it.
+use EmptyState from "exact:content"
+
+routes nav
+  home "/"
+    book "/book/:id"
+      create "/book/:id/create"
+    play "/play/:gen"
+
+shape Book
+  id: string
+  title: string
+  author: string
+  year: number
+  cover: string
+  versions: number
+
+shape Version
+  id: string
+  by: string
+  model: string
+  voice: string
+  status: string
+  done: number
+  total: number
+  error: string
+  sample: string
+
+shape BookDetail
+  book: Book
+  versions: Version[]
+
+shape Model
+  id: string
+  name: string
+
+shape Track
+  idx: number
+  title: string
+  src: string
+
+shape Audiobook
+  id: string
+  title: string
+  author: string
+  cover: string
+  by: string
+  model: string
+  tracks: Track[]
+
+shape Reply
+  ok: bool
+  error: string
+
+fn byline(b: Book): string = b.year > 0 ? `${b.author} · ${b.year}` : b.author
+fn versionsText(n: number): string = n == 0 ? "" : n == 1 ? "1 audiobook" : `${n} audiobooks`
+fn statusText(v: Version): string = v.status == "ready" ? `${v.total} ${v.total == 1 ? "chapter" : "chapters"}` : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : `Voicing ${v.done} of ${v.total}…`
+fn goodreads(b: Book): string = `https://www.goodreads.com/search?q=${encodeURIComponent(b.title + " " + b.author)}`
+fn trackTitle(a: Audiobook, i: number): string = match a.tracks.at(i) { case some(t) => t.title, case none => "" }
+fn trackSrc(a: Audiobook, i: number): string = match a.tracks.at(i) { case some(t) => t.src, case none => "" }
+
+component App
+  state query = ""
+  state asked = ""
+  state me = "" persist
+  state filePath = ""
+  state fileName = ""
+  state model = ""
+  state voice = ""
+  state rights = false
+  state refusal = ""
+  state track = 0
+  resource listening = loadListening() as shape Book[] else empty()
+  resource found = searchBooks(asked) as shape Book[] else empty()
+  resource models = loadModels() as shape Model[] else empty()
+  resource detail = loadBook(bookId) as shape BookDetail else empty()
+  resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
+  mutation created as shape Reply refreshes detail, listening then afterCreate
+  derive bookId = match stack(nav).filter(e => e.name == "book" or e.name == "create").at(-1) { case some(e) => e.params.id, case none => "" }
+  derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }
+  derive working = detail.versions.filter(v => v.status == "queued" or v.status == "working").length > 0
+  derive ready = detail.versions.filter(v => v.status == "ready")
+  derive createError = match created { case some(r) => r.error, case none => "" }
+  derive canCreate = filePath != "" and model != "" and rights and not pending(created)
+  derive createHint = pending(created) ? "Uploading…" : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
+  derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
+
+  // While an audiobook is being made, its page follows the progress.
+  task poll mount
+    every(3000, pull)
+
+  action pull
+    if working
+      refresh detail
+  action search(v: string)
+    query = v
+    if v.trim() == ""
+      asked = ""
+  action ask
+    asked = query.trim()
+  action back
+    nav = back(nav)
+  action follow(url: string)
+    nav = go(nav, url)
+  action openCreate
+    filePath = ""
+    fileName = ""
+    rights = false
+    refusal = ""
+    model = match first(models) { case some(m) => (model == "" ? m.id : model), case none => model }
+    nav = push(nav, path("create", bookId))
+  action chooseFile
+    showPicker("upload")
+  action picked(files: Picked[])
+    filePath = match first(files) { case some(f) => f.path, case none => filePath }
+    fileName = match first(files) { case some(f) => f.name, case none => fileName }
+  action pickModel(v: string)
+    model = v
+  action editVoice(v: string)
+    voice = v
+  action editMe(v: string)
+    me = v
+  action setRights(on: bool)
+    rights = on
+  action create
+    if canCreate
+      send created = createAudiobook(bookId, filePath, fileName, model, voice.trim(), me.trim(), rights)
+  action afterCreate
+    refusal = createError
+    if createError == "" and top(nav).name == "create"
+      nav = back(nav)
+  action listen(id: string)
+    track = 0
+    nav = push(nav, path("play", id))
+  action playTrack(i: number)
+    track = i
+  action nextTrack
+    if track + 1 < audiobook.tracks.length
+      track = track + 1
+
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow testId="app" width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "home"
+          column navigationKey=`${e.id}` navigationScroll="home-list" position="absolute" inset=0
+            header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px"
+              text "Exalt" role="heading" aria-level=1 flex=1
+              input type="search" value=query input=search submit=ask placeholder="Title or author"
+                aria-label="Search Books" testId="search" width="100%"
+            if asked != ""
+              if searchError != ""
+                EmptyState(symbol="symbol:alert", title="Can’t Search", message=searchError)
+              else if pending(found) and found.length == 0
+                column flex=1 justify-content="center" align-items="center"
+                  progress aria-label="Searching" testId="searching"
+              else if found.length == 0
+                EmptyState(symbol="symbol:search", title="No Books Found", message="Try a different title or author.")
+              else
+                list id="home-list" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+                  section
+                    for b in found key=b.id
+                      BookRow(book=b)
+            else if listening.length == 0
+              EmptyState(symbol="symbol:book", title="No Audiobooks Yet", message="Search for a book, then make the first audiobook of it from an EPUB, PDF or text file.")
+            else
+              list id="home-list" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+                section
+                  header
+                    text "Listen"
+                  for b in listening key=b.id
+                    BookRow(book=b)
+        if e.name == "book"
+          column navigationKey=`${e.id}` navigationScroll="book-detail" position="absolute" inset=0
+            header display="flex" align-items="center" padding="8px 16px"
+              text detail.book.title role="heading" aria-level=2 flex=1
+              button press=openCreate aria-label="Make Audiobook" testId="make"
+                image "symbol:add"
+            if detail.book.id != e.params.id
+              column flex=1 justify-content="center" align-items="center"
+                progress aria-label="Loading" testId="book-loading"
+            else
+              list id="book-detail" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+                section
+                  column align-items="center" gap=12 padding-top=16 padding-bottom=16
+                    Cover(src=detail.book.cover, size=160)
+                    column align-items="center" gap=4
+                      text detail.book.title font="-exact-title2" text-align="center" testId="book-title"
+                      text byline(detail.book) color="-exact-secondary-label" text-align="center"
+                    link href=goodreads(detail.book) testId="goodreads"
+                      text "Reviews on Goodreads"
+                for v in ready.slice(0, 1) key=v.id
+                  section
+                    header
+                      text "Sample"
+                    row padding-top=8 padding-bottom=8
+                      audio src=v.sample controls=true preload="metadata" width="100%" testId="sample"
+                section
+                  header
+                    text "Audiobooks"
+                  if detail.versions.length == 0
+                    row
+                      text "No one has made an audiobook of this yet." color="-exact-secondary-label" flex=1 testId="no-versions"
+                  for v in detail.versions key=v.id
+                    VersionRow(version=v, listen=listen)
+                  button press=openCreate testId="make-row"
+                    text "Make an Audiobook…"
+        if e.name == "create"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationScroll="create-form" position="absolute" inset=0
+            header display="flex" align-items="center" justify-content="space-between" padding="8px 16px"
+              button id="back" press=back aria-label="Cancel" testId="create-cancel"
+                image "symbol:close"
+              text "New Audiobook" role="heading"
+              button press=create buttonStyle="bordered-prominent" aria-label="Make" testId="create-save" disabled=(not canCreate)
+                image "symbol:checkmark"
+            list id="create-form" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+              section
+                header
+                  text "Book file"
+                row
+                  text (fileName == "" ? "EPUB, PDF or TXT" : fileName) flex=1 min-width=0
+                    color=(fileName == "" ? "-exact-secondary-label" : "-exact-label") testId="file-name"
+                  button press=chooseFile testId="choose-file"
+                    text (fileName == "" ? "Choose…" : "Change…")
+                  input type="file" id="upload" display="none" change=picked testId="upload"
+              section
+                header
+                  text "Voice"
+                row
+                  text "Model"
+                  select value=model change=pickModel aria-label="Model" testId="model"
+                    option "Choose…" value=""
+                    for m in models key=m.id
+                      option m.name value=m.id
+                row
+                  input value=voice input=editVoice placeholder="Voice (optional)" aria-label="Voice" flex=1 min-width=0 testId="voice"
+              section
+                row
+                  input value=me input=editMe placeholder="Your name (optional)" aria-label="Your name" flex=1 min-width=0 testId="me"
+                row
+                  text "I may share this" flex=1
+                  input type="checkbox" switch checked=rights change=setRights aria-label="I may share this" testId="rights"
+                footer
+                  text "The audiobook is public. Upload only books in the public domain or ones you hold the rights to." testId="rights-note"
+              if refusal != "" or createHint != ""
+                section
+                  row
+                    text (refusal != "" ? refusal : createHint) flex=1 min-width=0 font="-exact-footnote"
+                      color=(refusal != "" ? "-exact-system-red" : "-exact-secondary-label") testId="create-hint"
+        if e.name == "play"
+          column navigationKey=`${e.id}` navigationScroll="player" position="absolute" inset=0
+            header display="flex" align-items="center" padding="8px 16px"
+              text audiobook.title role="heading" aria-level=2 flex=1
+            if audiobook.id != e.params.gen
+              column flex=1 justify-content="center" align-items="center"
+                progress aria-label="Loading" testId="player-loading"
+            else
+              list id="player" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+                section
+                  column align-items="center" gap=12 padding-top=16 padding-bottom=16
+                    Cover(src=audiobook.cover, size=200)
+                    column align-items="center" gap=4
+                      text trackTitle(audiobook, track) font="-exact-headline" text-align="center" testId="now-playing"
+                      text `${audiobook.author} · read by ${audiobook.model}` color="-exact-secondary-label" text-align="center" font="-exact-footnote"
+                    if trackSrc(audiobook, track) != ""
+                      audio id="player-audio" src=trackSrc(audiobook, track) controls=true autoplay=true ended=nextTrack width="100%" testId="audio"
+                section
+                  header
+                    text "Chapters"
+                  for t in audiobook.tracks key=t.idx
+                    button press=playTrack(t.idx) text-align="start" display="flex" testId=`track-${t.idx}`
+                      text t.title flex=1 min-width=0 color=(t.idx == track ? "AccentColor" : "-exact-label")
+                      if t.idx == track
+                        image "symbol:speaker"
+
+component BookRow
+  props
+    book: Book
+  view
+    link href=path("book", book.id) testId=`book-${book.id}`
+      row gap=12 align-items="center" flex=1 min-width=0 padding-top=4 padding-bottom=4
+        Cover(src=book.cover, size=48)
+        column flex=1 min-width=0 gap=2
+          text book.title
+          text byline(book) font="-exact-subheadline" color="-exact-secondary-label"
+          if book.versions > 0
+            text versionsText(book.versions) font="-exact-footnote" color="AccentColor"
+      image "symbol:forward-chevron"
+
+component VersionRow
+  props
+    version: Version
+    listen: action
+  view
+    if version.status == "ready"
+      button press=listen(version.id) text-align="start" display="flex" testId=`version-${version.id}`
+        column flex=1 min-width=0 gap=2
+          text version.model
+          text `${version.by} · ${statusText(version)}` font="-exact-footnote" color="-exact-secondary-label"
+        image "symbol:play"
+    else
+      row testId=`version-${version.id}`
+        column flex=1 min-width=0 gap=2
+          text version.model
+          text statusText(version) font="-exact-footnote" color=(version.status == "failed" ? "-exact-system-red" : "-exact-secondary-label") testId=`status-${version.id}`
+        if version.status != "failed"
+          progress aria-label="Making"
+
+// A cover, or a book symbol on a plain tile where Open Library has none.
+component Cover
+  props
+    src: string
+    size: number
+  view
+    if src != ""
+      image src width=size height=(size * 1.5) object-fit="cover" border-radius=6 alt=""
+    else
+      column width=size height=(size * 1.5) border-radius=6 background-color="-exact-secondary-background" justify-content="center" align-items="center"
+        image "symbol:book" color="-exact-secondary-label"

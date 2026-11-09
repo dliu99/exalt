@@ -1,0 +1,30 @@
+{
+  "$schema": "../exact/scripts/app.schema.json",
+  "name": "Exalt",
+  "short_name": "Exalt",
+  "id": "app.exalt.audiobooks",
+  "start_url": "/",
+  "display": "standalone",
+  "app": {
+    "id": "app.exalt.audiobooks",
+    "name": "Exalt"
+  },
+  "host": {
+    "web": {}
+  },
+  "deploy": {
+    "store": {
+      "web": "0"
+    }
+  },
+  "env": [
+    "API_BASE_URL"
+  ],
+  "commands": {
+    "server": [
+      "bun",
+      "server/index.ts",
+      "--offline"
+    ]
+  }
+}

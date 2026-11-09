@@ -1,0 +1,26 @@
+test "an empty library says how to start"
+  clock data
+  expect tree has "app"
+  expect tree missing "book-OL1W"
+
+test "search finds a book and opens its page"
+  type "search" "rivers"
+  type "search" key "Enter"
+  clock data
+  expect tree has "book-OL2W"
+  tap "book-OL2W"
+  clock data
+  expect text "book-title" == "Notes on Rivers"
+  expect tree has "no-versions"
+  expect tree has "goodreads"
+
+test "making an audiobook waits for a file and consent"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  tap "make"
+  clock data
+  expect text "create-hint" == "Choose a file to read from."
+  expect state model == "exalt/silence"

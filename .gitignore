@@ -1,0 +1,11 @@
+/target/
+/dist/
+/dist.*
+/dist-windows/
+/node_modules/
+/app.contract.d.ts
+/.exact/
+/.env.local
+/data.db*
+/audio/
+/server/node_modules/
