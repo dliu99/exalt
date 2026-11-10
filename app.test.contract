@@ -18,7 +18,7 @@ test "a book on the lander opens the library searching for it"
 test "below the fold, the lander says what Exalt is and opens the library"
   clock data
   expect tree has "about"
-  expect tree has "lander-apple"
+  expect tree missing "lander-apple"
   expect tree has "lander-google"
   tap "lander-library"
   clock data
@@ -58,10 +58,11 @@ test "making an audiobook waits for a file and consent"
   expect text "book-description" == "A test book about a harbour."
   tap "make"
   clock data
-  expect text "create-hint" == "Sign in to make an audiobook."
   expect state model == "exalt/silence"
+  expect state rights == false
+  expect state canCreate == false
 
-test "making an audiobook asks for an account, with Apple's and Google's buttons"
+test "making an audiobook asks for an account, with Google's button"
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -72,10 +73,18 @@ test "making an audiobook asks for an account, with Apple's and Google's buttons
   tap "make"
   clock data
   expect tree has "sign-in-note"
-  expect tree has "apple-sign-in"
+  expect tree missing "apple-sign-in"
   expect tree has "google-sign-in"
+  expect text "sign-in-note" == "Sign in to make an audiobook. Listening needs no account."
   expect tree missing "account"
   expect tree missing "sign-out"
+  expect tree missing "model"
+  expect tree missing "rights"
+  expect tree missing "create-save"
+  clock settle
+  tap "create-cancel"
+  clock settle
+  expect text "book-title" == "A Quiet Harbour"
 
 test "typing suggests books under the field, and one opens its page"
   tap "enter"
@@ -130,7 +139,7 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
   expect text "voice-name" == "The Reader"
 
-test "a LibGen file can be selected instead of uploading a book"
+test "signed out, making an audiobook shows only the sign-in, not the form"
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -140,11 +149,8 @@ test "a LibGen file can be selected instead of uploading a book"
   clock data
   tap "make"
   clock data
-  expect tree has "book-source"
-  type "book-source" "lg-00000000000000000000000000000001"
-  expect state sourceId == "lg-00000000000000000000000000000001"
-  expect state filePath == ""
-  expect tree has "source-note"
-  type "rights" "true"
-  expect state rights == true
-  expect text "create-hint" == "Sign in to make an audiobook."
+  expect tree has "create-signed-out"
+  expect tree missing "book-source"
+  expect tree missing "choose-file"
+  expect tree missing "me"
+  expect tree missing "create-hint"

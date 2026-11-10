@@ -11,7 +11,7 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
   plays chapter after chapter.
 
-Listening needs no account. Making an audiobook needs one: Sign in with Apple or Google.
+Listening needs no account. Making an audiobook needs one: Sign in with Google.
 
 Audiobooks are public. The upload form asks the uploader to confirm the book is in the public
 domain or that they hold the rights to share it.
@@ -219,8 +219,9 @@ session credentials are sent only to `ZLIBRARY_BASE_URL`.
 
 ## Accounts
 
-Sign in with Apple and Google, as `../exact/docs/recipes/sign-in.md` describes. The app shows the
-providers' own buttons on the New Audiobook sheet. It asks the server for a single-use nonce, and
+Sign in with Google, as `../exact/docs/recipes/sign-in.md` describes. The app shows Google's own
+button on the lander, Home and the New Audiobook sheet (`server/auth.ts` can also check Apple's
+tokens, but the app offers no Apple button for now). It asks the server for a single-use nonce, and
 the provider signs an ID token over that nonce. `server/auth.ts` checks the token's signature
 against the provider's published keys, along with its issuer, audience, expiry and nonce. Then it
 answers a session token of Exalt's own: the app keeps it in its secret store and sends it as a
@@ -232,7 +233,6 @@ Register these clients, then set them for both the build (`app.json` `env`) and 
 
 | Variable | Default (a placeholder) | What it is |
 | --- | --- | --- |
-| `APPLE_SERVICES_ID` | `app.exalt.audiobooks.web` | Apple Services ID for the web; its return URL is `<PUBLIC_URL>/sign-in/return`. Natively Apple's audience is the bundle ID, `app.exalt.audiobooks`. |
 | `GOOGLE_WEB_CLIENT_ID` | `exalt-web.apps.googleusercontent.com` | Google OAuth web client; redirect URI `<PUBLIC_URL>/sign-in/return` |
 | `GOOGLE_IOS_CLIENT_ID` | `exalt-ios.apps.googleusercontent.com` | Google OAuth iOS client |
 

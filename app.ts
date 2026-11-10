@@ -5,16 +5,14 @@ import { preventSilentAccess } from '@exact/sign-in';
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
 export const API: string = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8787';
-// The sign-in clients registered with Apple and Google (app.json `env`; README "Accounts"); server/config.ts reads the same.
-// The server accepts tokens for these and for the bundle ID, Apple's audience natively.
-const APPLE_SERVICES_ID: string = import.meta.env.APPLE_SERVICES_ID ?? 'app.exalt.audiobooks.web';
+// The Google sign-in clients (app.json `env`; README "Accounts"); server/config.ts reads the same.
 const GOOGLE_WEB_CLIENT_ID: string = import.meta.env.GOOGLE_WEB_CLIENT_ID ?? 'exalt-web.apps.googleusercontent.com';
 const GOOGLE_IOS_CLIENT_ID: string = import.meta.env.GOOGLE_IOS_CLIENT_ID ?? 'exalt-ios.apps.googleusercontent.com';
 const SESSION = 'exalt.session';
 const PLACES = 'exalt.places';
 const VOICE = 'exalt.voice';
 export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
-  `auth.apple ${APPLE_SERVICES_ID}`, `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`].join('\n');
+  `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`].join('\n');
 
 type Reply = Result<'createAudiobook'>;
 type Book = Result<'searchBooks'>[number];
@@ -36,7 +34,7 @@ async function post(path: string, body: unknown, headers: Record<string, string>
   return (await res.json().catch(() => ({}))) as Record<string, any>;
 }
 
-// Sign in with Apple or Google (../exact/docs/recipes/sign-in.md): a single-use nonce from the
+// Sign in with Google (../exact/docs/recipes/sign-in.md): a single-use nonce from the
 // server, fetched before the press; at the press `get` runs with nothing awaited before it (on
 // the web the button holds the popup for it); the server checks the provider's token and answers
 // a session. Whatever happens, the next nonce is fetched.
@@ -47,12 +45,11 @@ async function identityNonce() {
   return { ok: true, error: '' };
 }
 const PROVIDERS = {
-  apple: { configURL: 'https://appleid.apple.com', clientId: APPLE_SERVICES_ID },
   google: { configURL: 'https://accounts.google.com/gsi/fedcm.json', clientId: GOOGLE_WEB_CLIENT_ID, apple: { clientId: GOOGLE_IOS_CLIENT_ID } },
 } as const;
 const errorName = (e: unknown) => String((e as { code?: string; name?: string })?.code ?? (e as { name?: string })?.name ?? 'error');
 
-async function signInWith(store: Store, name: 'apple' | 'google') {
+async function signInWith(store: Store, name: 'google') {
   const asked = ready;
   if (!asked) return { ok: false, error: 'Sign-in isn’t ready yet. Try again in a moment.' };
   ready = null;
@@ -139,7 +136,7 @@ const sources: Sources = {
     return { signedIn: s != null, name: s?.name ?? '' };
   },
   identityNonce: () => identityNonce(),
-  signInWith: ([name], store) => signInWith(store, name === 'google' ? 'google' : 'apple'),
+  signInWith: (_a, store) => signInWith(store, 'google'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
   loadPlaces: async (_a, store) => places(store),
