@@ -129,7 +129,8 @@ type Place = Result<'loadPlaces'>[number];
 const places = (store: Store): Place[] => {
   try { return JSON.parse(store.get(PLACES) ?? '[]'); } catch { return []; }
 };
-// The voice the listener prefers, from Fish Audio's library; empty until they choose one.
+// The voice the listener prefers, from Fish Audio's library (read through OpenRouter's Fish
+// models); empty until they choose one.
 type Pref = Result<'loadVoicePref'>;
 const NO_VOICE: Pref = { id: '', title: '', cover: '' };
 

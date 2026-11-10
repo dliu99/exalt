@@ -92,7 +92,7 @@ Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
     try { return send(await listModels(OFFLINE)); } catch (e) { return fail(e); }
   } },
 
-  // Fish Audio's library of voices, for the reader's choice.
+  // Fish Audio's library of voices to choose from (read through OpenRouter's Fish models).
   '/voices': { OPTIONS: preflight, GET: async (req) => {
     try { return send(await listVoices(new URL(req.url).searchParams.get('q') ?? '', OFFLINE)); } catch (e) { return fail(e); }
   } },

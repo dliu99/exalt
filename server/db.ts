@@ -29,7 +29,7 @@ db.run(`CREATE TABLE IF NOT EXISTS generations (
   error TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 )`);
-// The voice's name as the reader chose it (a Fish Audio voice is stored by id).
+// The voice's name as the reader chose it (a Fish Audio voice is stored by its id).
 if (!(db.query('PRAGMA table_info(generations)').all() as { name: string }[]).some((c) => c.name === 'voice_name'))
   db.run("ALTER TABLE generations ADD COLUMN voice_name TEXT NOT NULL DEFAULT ''");
 db.run(`CREATE TABLE IF NOT EXISTS tracks (

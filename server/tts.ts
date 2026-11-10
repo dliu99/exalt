@@ -1,7 +1,7 @@
 // Text to speech through an OpenAI-compatible `/audio/speech` endpoint, OpenRouter by default.
-// TTS_BASE_URL points it elsewhere (a self-hosted model, Fish Audio's own API behind a shim).
+// TTS_BASE_URL points it elsewhere (a self-hosted model). Fish Audio's models take a voice from
+// Fish's library by its id (fish.ts lists them).
 // The key stays on the server: OPENROUTER_API_KEY, never in the app.
-import { FISH_MODELS, fishReady, isFish, speakFish } from './fish.ts';
 export type Model = { id: string; name: string; voices: string[] };
 export type Voice = { audio: Uint8Array; ext: 'mp3' | 'pcm' | 'wav'; rate?: number };
 
@@ -35,14 +35,12 @@ export async function listModels(offline: boolean): Promise<Model[]> {
       voices = new Map((body.data ?? []).map((m) => [m.id, m.supported_voices ?? []]));
     }
   } catch { /* the picker still works; each model uses its own default voice */ }
-  // With a Fish Audio key, its own API comes first: the reader chooses the voice from Fish's library.
-  known = [...(fishReady() ? FISH_MODELS : []), ...chosen.map((m) => ({ ...m, voices: voices.get(m.id) ?? m.voices }))];
+  known = chosen.map((m) => ({ ...m, voices: voices.get(m.id) ?? m.voices }));
   return known;
 }
 
 export async function speak(model: string, voice: string, input: string): Promise<Voice> {
   if (model === FAKE.id) return { audio: wav(new Uint8Array(8000 * 2), 8000), ext: 'wav' };
-  if (isFish(model)) return { audio: await speakFish(model, voice, input), ext: 'mp3' };
   if (!KEY) throw new Error('The server has no OPENROUTER_API_KEY.');
   // A model with a voice list needs one of them; the first is its default.
   if (!voice) voice = (known ?? await listModels(false)).find((m) => m.id === model)?.voices[0] ?? '';
