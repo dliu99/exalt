@@ -504,7 +504,7 @@ component App
                         border-bottom="1px solid rgba(20,23,31,0.35)" padding-bottom=2
               // Below the fold, in the dark: what Exalt is, and signing up.
               column min-height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
-                padding=(wide ? "120px 24px" : "96px 24px") gap=44
+                padding=(wide ? "120px 24px" : "96px 24px") gap=44 position="relative"
                 column max-width=640 align-items="center" gap=22 opacity=fade
                   text "Exalt turns any book into audio in a voice you choose."
                     font-family="Jost" font-weight=300 font-size=(wide ? 32 : 24) line-height=1.3 color="#eeebe4" text-align="center" testId="about"
@@ -524,9 +524,18 @@ component App
                       text signInError color="#e8837b" font-family="Jost" font-size=14 text-align="center" testId="lander-sign-in-error"
                     link href=path("home") testId="lander-library" padding="10px 0" display="flex" justify-content="center"
                       text "Or just listen  →" font-family="Jost" font-size=15 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
+                // The credit, at the foot of the page.
+                row align-items="center" justify-content="center" gap=5 position="absolute" left=0 right=0 bottom=(wide ? 32 : 24) opacity=fade testId="credit"
+                  text "Made with" font-family="Jost" font-size=13 color="#9a978f"
+                  text "♥" font-size=13 color="#e8837b" aria-label="love"
+                  text "by" font-family="Jost" font-size=13 color="#9a978f"
+                  link href="https://devinliu.xyz" testId="credit-link"
+                    text "Devin Liu" font-family="Jost" font-size=13 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
             header display="flex" align-items="center" padding=(wide ? "28px 7vw" : "18px 24px") position="absolute" top=0 left=0 right=0 z-index=5
               background-color="transparent" border-bottom="none" pointer-events="none"
-              text "EXALT" flex=1 font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
+              view flex=1
+                link href="/" testId="wordmark" pointer-events="auto" padding="6px 0"
+                  text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
               link href=path("home") testId="enter" padding="6px 0" pointer-events="auto"
                 text "Home" font-family="Jost" font-weight=400 font-size=15 letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
         // Home: the painting as a faint band, then where you left off, what you made, and your voice.
