@@ -480,9 +480,8 @@ component App
             background-image="radial-gradient(ellipse closest-side at 50% 45%, rgba(120,128,150,0.16) 0%, rgba(120,128,150,0) 100%)"
             // The painting, behind everything, fading out and drifting up as the page scrolls.
             view position="absolute" inset=0 pointer-events="none" opacity=(1 - fade) overflow="hidden"
-              view position="absolute" inset=0 animation=(still ? "none" : "settle 18s cubic-bezier(.2,.6,.2,1) both")
-                image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH
-                  translate=`0px ${round(-scrollY * 0.25)}px`
+              image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH
+                translate=`0px ${round(-scrollY * 0.25)}px`
               view position="absolute" inset=0
                 background-image=(wide ? "linear-gradient(100deg, rgba(240,240,244,0.55) 0%, rgba(240,240,244,0.18) 38%, rgba(240,240,244,0) 60%)" : "linear-gradient(180deg, rgba(240,240,244,0.5) 0%, rgba(240,240,244,0.15) 45%, rgba(240,240,244,0) 70%)")
               // Fog drifting along the fold, out of which the books rise.
@@ -1022,8 +1021,6 @@ component VoiceRow
           text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
             border-bottom=(chosen ? "1px solid transparent" : "1px solid rgba(20,23,31,0.3)") padding-bottom=2
 
-keyframes settle
-  from scale=1.08
 keyframes arrive
   from opacity=0 translate="0px 40px"
 keyframes inkIn
