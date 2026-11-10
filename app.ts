@@ -99,27 +99,26 @@ const book = (b: Record<string, unknown>): Book => ({
 });
 const abs = (path: string) => (path ? `${API}${path}` : '');
 
-// The lander's stack: the canon, Homer to Nietzsche, in the handsomest current editions
+// The lander's stack: the canon, Plato to Ray Peat, in the handsomest current editions
 // (mostly Penguin Classics), covers in assets/covers named by ISBN.
 const greats: [string, string, string, string][] = [
-  ['9780143039952', 'The Odyssey', 'Homer', 'c. 725 BC'],
   ['9780141442433', 'The Republic', 'Plato', 'c. 375 BC'],
-  ['9780140449495', 'The Nicomachean Ethics', 'Aristotle', 'c. 340 BC'],
-  ['9780812968255', 'Meditations', 'Marcus Aurelius', 'c. 180'],
-  ['9780140441147', 'Confessions', 'Saint Augustine', '400'],
+  ['9780140449334', 'Meditations', 'Marcus Aurelius', 'c. 180'],
   ['9780140436327', 'Selected Writings', 'Thomas Aquinas', 'c. 1270'],
-  ['9780140448955', 'Inferno', 'Dante Alighieri', '1320'],
   ['9780140449150', 'The Prince', 'Niccolò Machiavelli', '1532'],
-  ['9780140446043', 'The Complete Essays', 'Michel de Montaigne', '1580'],
-  ['9780143128571', 'Hamlet', 'William Shakespeare', '1601'],
   ['9780140431957', 'Leviathan', 'Thomas Hobbes', '1651'],
   ['9780140442014', 'The Social Contract', 'Jean-Jacques Rousseau', '1762'],
+  ['9780140432084', 'The Wealth of Nations', 'Adam Smith', '1776'],
   ['9780140447477', 'Critique of Pure Reason', 'Immanuel Kant', '1781'],
+  ['9780140449013', 'Faust', 'Johann Wolfgang von Goethe', '1808'],
   ['9780140444490', 'Fear and Trembling', 'Søren Kierkegaard', '1843'],
-  ['9780143105954', 'Moby-Dick', 'Herman Melville', '1851'],
+  ['9780140447576', 'The Communist Manifesto', 'Karl Marx', '1848'],
   ['9781400079988', 'War and Peace', 'Leo Tolstoy', '1869'],
-  ['9780143107637', 'Crime and Punishment', 'Fyodor Dostoevsky', '1866'],
+  ['9780140449136', 'Crime and Punishment', 'Fyodor Dostoevsky', '1866'],
   ['9780140441185', 'Thus Spoke Zarathustra', 'Friedrich Nietzsche', '1883'],
+  ['9780140449235', 'Beyond Good and Evil', 'Friedrich Nietzsche', '1886'],
+  ['9780679720201', 'The Stranger', 'Albert Camus', '1942'],
+  ['9780970291363', 'Generative Energy', 'Ray Peat', '1994'],
 ];
 
 const sources: Sources = {

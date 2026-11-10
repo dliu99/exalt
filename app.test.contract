@@ -1,18 +1,18 @@
 test "the lander shows one book at a time, and turns through the stack"
   clock data
   expect text "hero-title" == "Give great words a voice"
-  expect text "great-title" == "The Odyssey"
-  tap "stack"
   expect text "great-title" == "The Republic"
   tap "stack"
-  expect text "great-title" == "The Nicomachean Ethics"
+  expect text "great-title" == "Meditations"
+  tap "stack"
+  expect text "great-title" == "Selected Writings"
 
 test "a book on the lander opens the library searching for it"
   clock data
   tap "stack"
   tap "seek"
   clock data
-  expect state asked == "The Republic Plato"
+  expect state asked == "Meditations Marcus Aurelius"
   expect tree has "search"
 
 test "below the fold, the lander says what Exalt is and opens the library"
