@@ -979,9 +979,9 @@ component VoiceRow
         button press=audition(voice.sample) appearance="none" aria-label=(playing ? "Stop sample" : "Hear sample") testId=`hear-${voice.id}`
           width=40 height=40 border-radius=999 display="flex" align-items="center" justify-content="center" border="1px solid rgba(20,23,31,0.25)" cursor="pointer" flex-shrink=0
           image (playing ? "symbol:stop-fill" : "symbol:play-fill") color="#14171f" width=12 height=12
-      row width=72 justify-content="flex-end" flex-shrink=0
+      row width=88 justify-content="flex-end" flex-shrink=0
         button press=choose(voice) appearance="none" testId=`use-${voice.id}` padding="4px 0" cursor="pointer"
-          text (chosen ? "✓ Yours" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
+          text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
             border-bottom=(chosen ? "1px solid transparent" : "1px solid rgba(20,23,31,0.3)") padding-bottom=2
 
 keyframes settle
