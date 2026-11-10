@@ -1,16 +1,21 @@
 // Exalt's server: the shared catalog, uploads, and the audiobooks made from them.
 // `bun server/index.ts` for development; `--offline` (what tests run) answers search from a
 // fixture and voices with silence, so nothing reaches the network.
+import { createHash } from 'node:crypto';
 import { join as pathJoin, normalize } from 'node:path';
 import { API, CLIENTS } from './config.ts';
 import { auth, type Provider } from './auth.ts';
 import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
 import { booksWithAudio, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
-import { AUDIO_DIR, enqueue } from './jobs.ts';
+import { AUDIO_DIR, enqueue, reserve, failJob, QueueFull } from './jobs.ts';
 import { parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
+import { lg } from './libgen.ts';
+import { audioURL, validateAudioFile } from './storage.ts';
+import { zlib } from './zlibrary.ts';
 import { listVoices } from './fish.ts';
 
+let uploading = 0;
 const OFFLINE = process.argv.includes('--offline');
 consolidate();
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
@@ -45,7 +50,7 @@ const versionJson = (g: GenerationRow) => {
 // says where instead (HOST, PORT), the public address being its proxy's.
 const listen = new URL(API);
 const hostname = process.env.HOST ?? listen.hostname, port = Number(process.env.PORT ?? listen.port);
-Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
+const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024, routes: {
   '/health': () => new Response('ok'),
 
   '/sign-in/nonce': { OPTIONS: preflight, POST: async (req) => send(accounts.nonce(await json(req))) },
@@ -107,23 +112,71 @@ Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
     } catch (e) { return fail(e); }
   } },
 
+  '/books/:id/sources': { OPTIONS: preflight, GET: async (req) => {
+    try {
+      const book = await ensureBook(req.params.id, OFFLINE);
+      if (!book) return send({ error: 'No such book.' }, 404);
+      if (OFFLINE) return send({ available: true, files: book.id === 'OL1W' ? [{ id: 'lg-00000000000000000000000000000001', label: 'LibGen · A Quiet Harbour · EPUB · English' }] : [] });
+      const providers = [
+        ...(lg.enabled ? [{ name: 'LibGen', api: lg, owns: /^lg-[a-f0-9]{32}$/ }] : []),
+        ...(zlib.configured ? [{ name: 'Z-Library', api: zlib, owns: /^zl-\d+-[a-zA-Z0-9]+$/ }] : []),
+      ];
+      if (!providers.length) return send({ available: false, files: [] });
+      const results = await Promise.allSettled(providers.map(async (p) => {
+        const [matches, selected] = await Promise.all([
+          p.api.search(`${book.title} ${book.author}`),
+          p.owns.test(req.params.id) ? p.api.book(req.params.id) : Promise.resolve(null),
+        ]);
+        return [...new Map([...(selected ? [selected] : []), ...matches].map((f) => [f.id, f])).values()]
+          .map((f) => ({ ...f, title: `${p.name} · ${f.title}` }));
+      }));
+      if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
+      const files = results.flatMap((r) => r.status === 'fulfilled' ? r.value : [])
+        .sort((a, b) => Number(b.extension === 'epub') - Number(a.extension === 'epub'));
+      return send({ available: true, files: files.map((f) => ({ id: f.id, label: [f.title, f.author, f.extension.toUpperCase(), f.language, f.size].filter(Boolean).join(' · ') })) });
+    } catch (e) { return fail(e); }
+  } },
+
   // The upload is the request body; what to make of it is in the query.
   '/books/:id/generations': { OPTIONS: preflight, POST: async (req) => {
     const me = accounts.user(req);
     if (!me) return signInRequired();
     const q = new URL(req.url).searchParams;
-    const name = q.get('name') ?? '', model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
+    let name = q.get('name') ?? '';
+    const source = q.get('source') ?? '';
+    if (source) server.timeout(req, 180);
+    const model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
     const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
     if (q.get('rights') !== '1') return send({ error: 'Confirm you have the right to share an audiobook of this file.' }, 400);
     if (!model) return send({ error: 'Choose a voice model.' }, 400);
+    if (model.length > 120 || voice.length > 200 || !(await listModels(OFFLINE)).some((m) => m.id === model)) return send({ error: 'Choose one of the available voice models.' }, 400);
     const book = await ensureBook(req.params.id, OFFLINE).catch(() => null);
     if (!book) return send({ error: 'No such book.' }, 404);
-    let chapters;
-    try { chapters = await parseBook(name, new Uint8Array(await req.arrayBuffer())); } catch (e) { return fail(e, 400); }
-    const { lastInsertRowid } = db.query(`INSERT INTO generations (book_id, user_id, made_by, model, voice, voice_name, source_name, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(book.id, me.id, by.slice(0, 40), model, voice, voiceName, name, Date.now());
-    enqueue({ id: Number(lastInsertRowid), model, voice, chapters });
-    return send({ ok: true, id: String(lastInsertRowid) }, 201);
+    if (source && !/^lg-[a-f0-9]{32}$/.test(source) && !/^zl-\d+-[a-zA-Z0-9]+$/.test(source)) return send({ error: 'Invalid book source.' }, 400);
+    if (!OFFLINE && ((source.startsWith('lg-') && !lg.enabled) || (source.startsWith('zl-') && !zlib.configured))) return send({ error: 'This book source is not connected.' }, 400);
+    if (OFFLINE && source && (source !== 'lg-00000000000000000000000000000001' || book.id !== 'OL1W')) return send({ error: 'No such source.' }, 400);
+    let admitted;
+    try {
+      admitted = reserve({ book: book.id, user: me.id, by, model, voice, voiceName, name, source });
+      if (admitted.reused) return send({ ok: true, id: String(admitted.id), reused: true });
+      if (source) {
+        enqueue(admitted.id, { source, ...(OFFLINE ? { offline: true } : {}) });
+      } else {
+        // At most two uploads parse concurrently in this one-process deployment.
+        if (uploading >= 2) throw new QueueFull('Uploads are busy. Try again shortly.');
+        uploading++;
+        try {
+          const bytes = new Uint8Array(await req.arrayBuffer());
+          const chapters = await parseBook(name, bytes);
+          db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(createHash('sha256').update(bytes).digest('hex'), admitted.id);
+          enqueue(admitted.id, { chapters });
+        } finally { uploading--; }
+      }
+      return send({ ok: true, id: String(admitted.id) }, 202);
+    } catch (e) {
+      if (admitted && !admitted.reused) failJob(admitted.id, e);
+      return fail(e, e instanceof QueueFull ? 429 : 400);
+    }
   } },
 
   '/generations/:id': { OPTIONS: preflight, GET: (req) => {
@@ -138,14 +191,26 @@ Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
     if (req.method === 'OPTIONS') return preflight();
     const rel = normalize(decodeURIComponent(new URL(req.url).pathname.slice('/audio/'.length)));
     if (rel.startsWith('..') || rel.startsWith('/')) return new Response('Not found', { status: 404 });
+    try { validateAudioFile(rel); } catch { return send({ error: 'No such audio.' }, 404); }
+    const track = db.query('SELECT storage FROM tracks WHERE file = ? LIMIT 1').get(rel) as { storage: string } | null;
+    if (!track) return send({ error: 'No such audio.' }, 404);
+    if (track.storage === 's3') {
+      try { return new Response(null, { status: 302, headers: { ...CORS, location: audioURL(rel), 'cache-control': 'no-store' } }); }
+      catch (e) { return fail(e, 503); }
+    }
     const file = Bun.file(pathJoin(AUDIO_DIR, rel));
     if (!(await file.exists())) return new Response('Not found', { status: 404, headers: CORS });
     const type = rel.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg';
-    const range = req.headers.get('range')?.match(/bytes=(\d*)-(\d*)/);
-    if (!range) return new Response(file, { headers: { ...CORS, 'content-type': type, 'accept-ranges': 'bytes' } });
-    const size = file.size, start = range[1] ? Number(range[1]) : size - Number(range[2]), end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
-    if (start >= size || start < 0) return new Response(null, { status: 416, headers: { ...CORS, 'content-range': `bytes */${size}` } });
-    return new Response(file.slice(start, end + 1), { status: 206, headers: { ...CORS, 'content-type': type, 'accept-ranges': 'bytes', 'content-range': `bytes ${start}-${end}/${size}` } });
+    const common = { ...CORS, 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'public, max-age=3600' };
+    const rangeHeader = req.headers.get('range');
+    if (!rangeHeader) return new Response(file, { headers: common });
+    const range = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+    const size = file.size;
+    if (!range || (!range[1] && !range[2])) return new Response(null, { status: 416, headers: { ...CORS, 'content-range': `bytes */${size}` } });
+    const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+    const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || start < 0 || start > end) return new Response(null, { status: 416, headers: { ...CORS, 'content-range': `bytes */${size}` } });
+    return new Response(file.slice(start, end + 1), { status: 206, headers: { ...common, 'content-range': `bytes ${start}-${end}/${size}` } });
   },
 } });
-console.log(`server/index.ts: http://${hostname}:${port}${OFFLINE ? ' (offline)' : ` (books from ${providerName})`}`);
+console.log(`server/index.ts: http://${hostname}:${server.port}${OFFLINE ? ' (offline)' : ` (books from ${providerName})`}`);

@@ -2,6 +2,7 @@
 // on volumes shaped like what Google answered for these searches. `bun test server`.
 import { expect, test } from 'bun:test';
 process.env.DB = ':memory:';
+process.env.LIBGEN_ENABLED = '0';
 const { rankVolumes } = await import('./catalog.ts');
 import type { Volume } from './catalog.ts';
 
@@ -162,4 +163,39 @@ test('an edition whose names point at two saved books shows they were one, and m
   expect(one.id).toBe('gb-M1');
   expect(getBook('gb-M2')).toBeNull();
   expect(linkedBook(['gb-M2'])).toBe('gb-M1');
+});
+
+test('Z-Library augments catalog search, merges editions and answers when the catalog is down', async () => {
+  const { zlib } = await import('./zlibrary.ts');
+  const original = { configured: zlib.configured, search: zlib.search, book: zlib.book, fetch: globalThis.fetch };
+  const remote = { id: 'zl-765-abc', title: 'The Public Harbour', author: 'Ada Writer', year: 1900, cover: '', description: '', extension: 'epub', language: 'English', size: '' };
+  try {
+    zlib.configured = true;
+    zlib.search = async () => [remote];
+    zlib.book = async () => remote;
+    globalThis.fetch = (async () => Response.json({ items: [vol('public-harbour', remote.title, [remote.author])] })) as typeof fetch;
+    expect((await search('public harbour', false, 'google')).map((b) => b.id)).toEqual(['gb-public-harbour']);
+    const saved = await (await import('./catalog.ts')).ensureBook(remote.id, false);
+    expect(saved?.title).toBe(remote.title);
+    globalThis.fetch = (async () => new Response('', { status: 503 })) as typeof fetch;
+    expect((await search('public harbour ada', false, 'google')).map((b) => b.id)).toEqual([remote.id]);
+    zlib.search = async () => { throw new Error('Z-Library unavailable'); };
+    await expect(search('uncached unavailable query', false, 'google')).rejects.toThrow();
+  } finally {
+    zlib.configured = original.configured; zlib.search = original.search; zlib.book = original.book; globalThis.fetch = original.fetch;
+  }
+});
+
+test('LibGen results join catalog search and saved books resolve from stable file hashes', async () => {
+  const { lg } = await import('./libgen.ts');
+  const old = { enabled: lg.enabled, search: lg.search, book: lg.book, fetch: globalThis.fetch };
+  const file = { id: 'lg-1234567890abcdef1234567890abcdef', title: 'The Open River', author: 'Ada Writer', year: 1900, cover: '', description: '', extension: 'epub', language: 'eng', size: '' };
+  try {
+    lg.enabled = true; lg.search = async () => [file]; lg.book = async () => file;
+    globalThis.fetch = (async () => Response.json({ items: [vol('river-meta', file.title, [file.author])] })) as typeof fetch;
+    expect((await search('open river', false, 'google')).map((b) => b.id)).toEqual(['gb-river-meta']);
+    const saved = await (await import('./catalog.ts')).ensureBook(file.id, false);
+    expect(saved?.title).toBe(file.title);
+    expect((await search('open river ada', false, 'google')).map((b) => b.id)).toEqual([file.id]);
+  } finally { lg.enabled = old.enabled; lg.search = old.search; lg.book = old.book; globalThis.fetch = old.fetch; }
 });

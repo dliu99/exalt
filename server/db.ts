@@ -40,6 +40,22 @@ db.run(`CREATE TABLE IF NOT EXISTS tracks (
   PRIMARY KEY (generation_id, idx)
 )`);
 
+// Durable queue payloads exist only while work is queued/running. Source PDFs/EPUBs are not retained.
+db.run(`CREATE TABLE IF NOT EXISTS generation_jobs (
+  generation_id INTEGER PRIMARY KEY REFERENCES generations(id),
+  payload TEXT NOT NULL
+)`);
+for (const [name, type] of [['source_ref', "TEXT NOT NULL DEFAULT ''"], ['source_hash', "TEXT NOT NULL DEFAULT ''"]]) {
+  if (!(db.query('PRAGMA table_info(generations)').all() as { name: string }[]).some((c) => c.name === name))
+    db.run(`ALTER TABLE generations ADD COLUMN ${name} ${type}`);
+}
+for (const [name, type] of [['bytes', 'INTEGER NOT NULL DEFAULT 0'], ['storage', "TEXT NOT NULL DEFAULT 'local'"]]) {
+  if (!(db.query('PRAGMA table_info(tracks)').all() as { name: string }[]).some((c) => c.name === name))
+    db.run(`ALTER TABLE tracks ADD COLUMN ${name} ${type}`);
+}
+db.run('CREATE INDEX IF NOT EXISTS generations_status ON generations(status)');
+db.run('CREATE INDEX IF NOT EXISTS tracks_file ON tracks(file)');
+
 // Every name a book goes by: provider ids (`gb-…`, `hc-…`, `OL…W`), its editions' ISBNs
 // (`isbn:…`) and its normalized title and author (`key:…`). One name, one book.
 db.run(`CREATE TABLE IF NOT EXISTS links (
@@ -51,9 +67,9 @@ db.run('CREATE INDEX IF NOT EXISTS links_book ON links(book_id)');
 export type BookRow = { id: string; title: string; author: string; year: number; cover: string; description: string };
 export type GenerationRow = {
   id: number; book_id: string; made_by: string; model: string; voice: string; voice_name?: string; source_name: string;
-  status: string; done: number; total: number; error: string; created_at: number;
+  source_ref?: string; source_hash?: string; status: string; done: number; total: number; error: string; created_at: number;
 };
-export type TrackRow = { generation_id: number; idx: number; title: string; file: string };
+export type TrackRow = { generation_id: number; idx: number; title: string; file: string; bytes: number; storage: string };
 
 export const upsertBook = (b: BookRow) =>
   db.query(`INSERT INTO books (id, title, author, year, cover, description) VALUES (?, ?, ?, ?, ?, ?)

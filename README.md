@@ -4,7 +4,7 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
 
 - **One record per book.** Books come from Open Library (title, author, year, cover), keyed by
   their work id. Every audiobook anyone makes of a book hangs off that one record.
-- **Make an audiobook** by uploading an EPUB, PDF or TXT and choosing a voice model. The
+- **Make an audiobook** by selecting a LibGen EPUB/PDF (or an optional Z-Library source) or uploading an EPUB, PDF or TXT, then choosing a voice model. The
   server splits the file into chapters, voices the whole book up front, and stores one audio
   file per chapter.
 - **Listen.** A book's page shows a sample (the first chapter of its first finished
@@ -28,9 +28,15 @@ domain or that they hold the rights to share it.
 | `server/db.ts` | SQLite schema: `books`, `generations`, `tracks` |
 | `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
 | `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
-| `server/jobs.ts` | The queue that voices a book, one chapter file at a time |
+| `server/jobs.ts` | Durable SQLite queue, admission limits and chapter checkpoints |
+| `server/libgen.ts` | LibGen discovery, JSON metadata and verified downloads |
+| `server/storage.ts` | Local or S3-compatible chapter audio storage |
 
 ## Run it
+
+In Conductor, the default **app** action starts both servers. **backend** and **frontend**
+are also available separately. Each workspace uses its allocated frontend port and the next
+port for the API; Stop shuts down both processes. Outside Conductor, run commands below.
 
 Exact is used from a checkout beside this one (`../exact`; `EXACT2` overrides it):
 
@@ -61,10 +67,124 @@ offline server: `bun exact.mjs test web`.
 | `TTS_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible speech API |
 | `TTS_MODELS` | Fish Audio S2.1 Pro (free), HeyGen Voice Turbo (free), Gemini 3.8 Flash Lite TTS, Gemini 3.8 Flash TTS | Replace the model picker: `id=Name,id=Name` |
 | `DB` | `data.db` | SQLite file |
-| `AUDIO_DIR` | `audio/` beside `DB` | Where chapter files are written |
+| `AUDIO_DIR` | `audio/` beside `DB` | Local audio and scratch directory (on persistent disk) |
+| `MAX_BOOK_CHARACTERS` | 5000000 | Maximum extracted characters in one book |
+| `MAX_GENERATION_BYTES` | 2 GiB | Maximum stored audio bytes for one generation |
+| `AUDIO_MAX_BYTES` | 8 GiB local; 0 with S3 | Cap on recorded chapter bytes; 0 means no aggregate cap |
+| `LIBGEN_ENABLED` | `1` | Set to `0` to disable LibGen search and downloads |
+| `LIBGEN_MIRRORS` | `https://libgen.li,https://libgen.bz` | Comma-separated trusted HTTPS origins |
+| `LIBGEN_DOWNLOAD_ORIGINS` | none | Additional exact trusted HTTPS origins for file redirects |
 | `GOOGLE_CLIENT_SECRET` | none | The Google web client's secret, for the web sign-in's code exchange |
 | `PUBLIC_URL` | `API_BASE_URL` | The server's public address (the web sign-in's return route is under it) |
 | `WEB_ORIGINS` | none | The site's origins, comma-separated, that the web sign-in may return to (loopback ones always may) |
+
+## LibGen search and downloads
+
+LibGen is enabled by default, with no account or API key. Search includes its EPUB/PDF
+results alongside the metadata catalog; `BOOK_PROVIDER=libgen` searches it alone. On a
+book's **New Audiobook** sheet, choose a file under **Download**, select a voice, confirm
+sharing rights and press **Make**. The server responds with a generation ID immediately
+(`202`); the worker downloads and verifies the file before narration. Source failures appear
+on the book's generation status. Uploads remain available.
+
+The adapter uses HTML search, `json.php` for edition/file details, and the download landing
+page to resolve a short-lived link. Requests have timeouts, bounded responses and mirror
+fallback. Repeated searches coalesce and cache for ten minutes, with four concurrent
+upstream searches allowed. Only EPUB/PDF downloads under 50 MiB are accepted, redirect
+hosts are checked (configured mirrors and numbered `cdn*.booksdl.lc` download hosts), and downloaded bytes must match the selected MD5. Mirror HTML and
+availability can change; this is an optional external provider, not an uptime guarantee.
+
+## Storage and backend capacity
+
+| Data | Storage | Retention |
+| --- | --- | --- |
+| Book metadata, accounts, hashed sessions, source IDs/hashes, narration settings and progress | SQLite at `DB` | Retained |
+| Queued source reference or extracted chapter text | SQLite `generation_jobs` | Removed on completion or failure |
+| Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
+| Incomplete chapter audio | `AUDIO_DIR/.tmp` | Removed after upload/failure; interrupted chapter is overwritten on resume |
+| Finished chapter audio | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
+| Listening position and voice preference | The listener's device | Until cleared |
+
+The backend runs **one instance and one generation worker**. SQLite is a durable queue:
+a restart resumes queued work and skips completed chapters. An interrupted chapter may
+repeat TTS calls; completed chapters do not. New jobs are capped at 20 pending globally and
+two per account. Concurrent upload parsing is capped at two. Books default to a limit of five
+million extracted characters, and each generated audiobook to 2 GiB. EPUB expansion is
+bounded and chapter audio is written to scratch chunk by chunk, rather than accumulated
+in memory. Transient TTS failures retry up to three attempts. The same source, book, model
+and voice reuse an existing queued/working/ready generation instead of generating again.
+
+The Render blueprint mounts a 10 GB persistent disk. The default 8 GiB audio cap and a
+256 MiB free-space check stop work before normal audio growth consumes the disk; queue,
+metadata, scratch, WAL and backups also need space. Failed versions may retain completed
+chapters for playback and count against the cap. Audio has no automatic eviction: monitor
+storage and expand it or remove obsolete versions operationally. Back up SQLite and local
+audio together. Queue payload deletion is logical cleanup; backups can retain earlier data.
+This is a bounded single-server deployment, not horizontal generation scaling. Multiple API
+instances/workers require a shared database and job-claiming/lease design first.
+
+### S3-compatible audio storage
+
+For production audio delivery, configure a private bucket (AWS S3, Cloudflare R2, or another
+S3-compatible service):
+
+```bash
+AUDIO_S3_BUCKET=exalt-audio
+AUDIO_S3_ENDPOINT=https://your-s3-compatible-endpoint
+AUDIO_S3_REGION=auto
+AUDIO_S3_ACCESS_KEY_ID=your-server-access-key
+AUDIO_S3_SECRET_ACCESS_KEY=your-server-secret-key
+```
+
+Use the actual AWS region for AWS S3. Keys remain server-side. The worker writes a chapter
+locally, uploads it to `audio/<generation>/<chapter>.mp3` (or `.wav`), then publishes the
+track row and deletes the scratch copy. `/audio/...` redirects S3 tracks to a signed GET URL
+valid for one hour, so the bucket serves playback/byte ranges directly. Configure bucket
+CORS to allow the app's origins, GET/HEAD, the Range header, and exposure of Content-Range,
+Accept-Ranges and Content-Length. MP3 is used where supported; PCM-only models are stored
+as WAV, which consumes considerably more space.
+
+SQLite records each track's storage backend, so existing local tracks keep playing after S3
+is enabled. Existing files are not automatically migrated, and changing buckets/endpoints
+requires copying their objects with the same keys. SQLite and temporary scratch still need
+a persistent disk when using S3. Bucket provisioning, backups, retention rules and storage
+billing remain deployment configuration; the code does not create cloud resources.
+
+For capacity planning, a 10-hour MP3 at 64 kbit/s is about **288 MB**; at 128 kbit/s it is
+about **576 MB**. Actual provider output determines the size. The default 2 GiB per-generation
+cap stops larger output; PCM/WAV reaches it much sooner. One stored version serves every
+listener; playback does not trigger fresh TTS calls.
+
+## Z-Library search and downloads
+
+Connect an existing Z-Library session on the **server**:
+
+```bash
+ZLIBRARY_BASE_URL=https://your-working-domain.example
+ZLIBRARY_USER_ID=your_remix_userid_cookie
+ZLIBRARY_USER_KEY=your_remix_userkey_cookie
+```
+
+Use the HTTPS origin of your working Z-Library domain, and the `remix_userid` and
+`remix_userkey` cookies from your signed-in browser session. Keep these values in the
+server environment, alongside `OPENROUTER_API_KEY`; never add them to `app.json` or a client build.
+This uses Z-Library's unofficial mobile EAPI, whose availability and domains can change.
+Protocol references: [KOReader client](https://github.com/ZlibraryKO/zlibrary.koplugin) and
+[EAPI client documentation](https://github.com/heartleo/zlib/blob/main/docs/eapi.md).
+
+Search includes Z-Library books alongside the configured metadata catalog, merging editions.
+You can also set `BOOK_PROVIDER=zlibrary` to search it alone. Open a book, choose **New
+Audiobook**, select a Z-Library file, choose the voice, confirm sharing rights, and press
+**Make**. The durable worker downloads the selected EPUB/PDF, extracts chapters, and sends their
+text through the OpenRouter TTS queue. Uploads remain available when no download
+is found or Z-Library is disconnected.
+
+The session belongs to the server: every signed-in creator uses that account's download
+allowance. Expired sessions, quota limits and unavailable downloads return an error on the
+creation sheet. No download happens until the creator confirms Make. Files are limited to
+50 MiB for processing. If your domain serves downloads through another trusted HTTPS origin, list its
+exact origin in `ZLIBRARY_DOWNLOAD_ORIGINS` (comma-separated); redirects are checked and
+session credentials are sent only to `ZLIBRARY_BASE_URL`.
 
 ## Accounts
 
@@ -106,4 +226,5 @@ and saved as one WAV per chapter; the others are MP3. Run the server from the re
   everyone. This costs less than voicing whole books, and fits a free model that may not stay free.
 - Let people remove their own versions, and cap how many each account makes per day.
 - Ratings of versions; reviews beside the Goodreads link.
-- A background worker and object storage instead of one process and a folder.
+- Shared database and leased worker jobs for horizontal generation scaling.
+- Audio retention/deletion controls and storage usage reporting.

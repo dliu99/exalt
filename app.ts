@@ -88,8 +88,8 @@ async function signOut(store: Store) {
   return { ok: true, error: '' };
 }
 
-async function get(path: string): Promise<unknown> {
-  const res = await fetch(`${API}${path}`, { exactTimeout: 15000 });
+async function get(path: string, timeout = 15000): Promise<unknown> {
+  const res = await fetch(`${API}${path}`, { exactTimeout: timeout });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `The server answered ${res.status}.`);
   return body;
@@ -180,7 +180,7 @@ const sources: Sources = {
   loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
   loadBook: async ([id]) => {
     if (!id) return { book: { id: '', title: '', author: '', year: 0, cover: '', description: '', versions: 0 }, versions: [] };
-    const body = (await get(`/books/${encodeURIComponent(id)}`)) as { book: Record<string, unknown>; versions: Record<string, unknown>[] };
+    const body = (await get(`/books/${encodeURIComponent(id)}`, 30000)) as { book: Record<string, unknown>; versions: Record<string, unknown>[] };
     return {
       book: book(body.book),
       versions: body.versions.map((v) => ({
@@ -188,6 +188,10 @@ const sources: Sources = {
         done: Number(v.done), total: Number(v.total), error: String(v.error), sample: abs(String(v.sample)), voiceName: String(v.voiceName ?? ''),
       })),
     };
+  },
+  loadBookSources: async ([id]) => {
+    if (!id) return { available: false, files: [] };
+    return await get(`/books/${encodeURIComponent(id)}/sources`, 30000) as Result<'loadBookSources'>;
   },
   loadAudiobook: async ([id]) => {
     if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', tracks: [] };
@@ -201,12 +205,12 @@ const sources: Sources = {
     };
   },
   // The picked file's bytes go up as the request body.
-  createAudiobook: async ([bookId, path, name, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
+  createAudiobook: async ([bookId, path, name, sourceId, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
     try {
-      const bytes = await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, model, voice, voiceName, by, rights: rights ? '1' : '0' });
+      const bytes = sourceId ? undefined : await storage.fs.readFile(path);
+      const query = new URLSearchParams({ name, source: sourceId, model, voice, voiceName, by, rights: rights ? '1' : '0' });
       const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        method: 'POST', body: bytes, exactTimeout: sourceId ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       // A session the server no longer knows (signed out elsewhere, or expired): sign in again.

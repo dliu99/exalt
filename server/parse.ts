@@ -1,16 +1,19 @@
 // An uploaded book to chapters of plain text: EPUB by its spine, PDF by pages, TXT by its
 // "Chapter" headings. Anything without chapters is cut into parts of about PART_WORDS words.
+import { MAX_BOOK_BYTES, MAX_TEXT_CHARS } from './limits.ts';
 import { strFromU8, unzipSync } from 'fflate';
 
 export type Chapter = { title: string; text: string };
 const PART_WORDS = 4000;
 
 export async function parseBook(name: string, bytes: Uint8Array): Promise<Chapter[]> {
+  if (bytes.length > MAX_BOOK_BYTES) throw new Error('Book files must be under 50 MB.');
   const ext = name.toLowerCase().split('.').pop();
   const chapters = ext === 'epub' ? parseEpub(bytes) : ext === 'pdf' ? await parsePdf(bytes) : ext === 'txt' ? parseTxt(new TextDecoder().decode(bytes)) : null;
   if (!chapters) throw new Error('Upload an EPUB, PDF or TXT file.');
   const kept = chapters.map((c) => ({ title: c.title, text: tidy(c.text) })).filter((c) => c.text.split(' ').length >= 20);
   if (kept.length === 0) throw new Error('No readable text was found in this file.');
+  if (kept.reduce((n, c) => n + c.text.length + c.title.length, 0) > MAX_TEXT_CHARS) throw new Error(`This book exceeds the ${MAX_TEXT_CHARS.toLocaleString('en-US')}-character narration limit.`);
   return kept;
 }
 
@@ -44,7 +47,14 @@ const htmlText = (html: string) => decode(html
 const attr = (tag: string, name: string) => tag.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1] ?? '';
 
 function parseEpub(bytes: Uint8Array): Chapter[] {
-  const files = unzipSync(bytes);
+  let expanded = 0;
+  const files = unzipSync(bytes, { filter(file) {
+    // Images/fonts aren't needed for narration. Bound expansion before allocating entries.
+    if (!/\.(xml|opf|xhtml|html|htm|ncx)$/i.test(file.name)) return false;
+    expanded += file.originalSize;
+    if (expanded > 50 * 1024 * 1024 || file.originalSize > 8 * 1024 * 1024) throw new Error('The EPUB expands beyond the text extraction limit.');
+    return true;
+  } });
   const read = (path: string) => (files[path] ? strFromU8(files[path]) : '');
   const opfPath = attr(read('META-INF/container.xml').match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
   const opf = read(opfPath);
