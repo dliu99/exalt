@@ -1,7 +1,7 @@
 // Side by side, what each book provider answers to the same searches, from the running server
 // (`bun exact.mjs server` or the dev server): its cache answers repeats, so comparing costs
 // Hardcover one request per new search. `bun exact.mjs compare "dune" "mike ma"`.
-import { API } from '../app.ts';
+import { API } from './config.ts';
 
 const PROVIDERS = (process.env.PROVIDERS ?? 'hardcover,google,openlibrary').split(',');
 const ROWS = Number(process.env.ROWS ?? 8);

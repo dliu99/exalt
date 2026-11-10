@@ -6,5 +6,8 @@
     "start": "bun exact.mjs serve dist",
     "deploy:web": "sh deploy/web.sh"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@exact/passkeys": "file:../exact/packages/passkeys",
+    "@exact/sign-in": "file:../exact/packages/sign-in"
+  }
 }
