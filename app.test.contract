@@ -13,6 +13,7 @@ test "search finds a book and opens its page"
   expect text "book-title" == "Notes on Rivers"
   expect tree has "no-versions"
   expect tree has "goodreads"
+  expect tree missing "book-description"
 
 test "making an audiobook waits for a file and consent"
   type "search" "harbour"
@@ -20,7 +21,20 @@ test "making an audiobook waits for a file and consent"
   clock data
   tap "book-OL1W"
   clock data
+  expect text "book-description" == "A test book about a harbour."
   tap "make"
   clock data
   expect text "create-hint" == "Choose a file to read from."
   expect state model == "exalt/silence"
+
+test "results follow the typing after a pause"
+  type "search" "ri"
+  clock +400
+  clock data
+  expect tree missing "book-OL2W"
+  type "search" "rivers"
+  clock +100
+  expect tree missing "book-OL2W"
+  clock +400
+  clock data
+  expect tree has "book-OL2W"

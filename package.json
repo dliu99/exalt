@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "build": "bun exact.mjs web-build --out dist",
-    "start": "bun exact.mjs serve dist"
+    "start": "bun exact.mjs serve dist",
+    "deploy:web": "sh deploy/web.sh"
   },
   "dependencies": {}
 }

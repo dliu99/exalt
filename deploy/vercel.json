@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": false,
+  "rewrites": [
+    { "source": "/book/:id", "destination": "/shell.html" },
+    { "source": "/book/:id/create", "destination": "/shell.html" },
+    { "source": "/play/:gen", "destination": "/shell.html" }
+  ],
+  "headers": [
+    { "source": "/(.*)\\.(js|mjs|css|wasm)", "headers": [{ "key": "cache-control", "value": "public, max-age=300" }] }
+  ]
+}
