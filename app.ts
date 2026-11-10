@@ -38,7 +38,8 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 // server, fetched before the press; at the press `get` runs with nothing awaited before it (on
 // the web the button holds the popup for it); the server checks the provider's token and answers
 // a session. Whatever happens, the next nonce is fetched.
-const onWeb = () => /^https?:\/\//.test(authCallback());
+// The web has a callback address; a native host has none to ask for (and no grant for one).
+const onWeb = () => { try { return /^https?:\/\//.test(authCallback()); } catch { return false; } };
 let ready: { nonce: string; client: string } | null = null;
 async function identityNonce() {
   ready = (await post('/sign-in/nonce', { client: ready?.client, callback: onWeb() ? authCallback() : '' })) as { nonce: string; client: string };
@@ -123,8 +124,20 @@ const greats: [string, string, string, string][] = [
 // Where the listener is in each audiobook, kept on this device (signed in or not), newest first.
 type Place = Result<'loadPlaces'>[number];
 const places = (store: Store): Place[] => {
-  try { return JSON.parse(store.get(PLACES) ?? '[]'); } catch { return []; }
+  try { return (JSON.parse(store.get(PLACES) ?? '[]') as Place[]).map((p) => ({ ...p, at: Number(p.at) || 0 })); } catch { return []; }
 };
+// The shelf's words for a place: about how long is left (the chapters still to come taken to
+// run as long as this one), and when it was last heard.
+const span = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.max(1, Math.round(s / 60))}m`);
+const leftText = (p: Place) => (p.duration > 0
+  ? `About ${span(p.duration - p.time + (p.tracks - p.track - 1) * p.duration)} left`
+  : `${p.tracks - p.track} ${p.tracks - p.track === 1 ? 'chapter' : 'chapters'} left`);
+const whenText = (at: number, now: number) => {
+  if (!at) return '';
+  const days = Math.floor((new Date(now).setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 86400000);
+  return now - at < 3600000 ? 'Just now' : days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days} days ago`;
+};
+const fraction = (p: Place) => (p.tracks ? Math.min(1, (p.track + (p.duration > 0 ? p.time / p.duration : 0)) / p.tracks) : 0);
 // The voice the listener prefers, from Fish Audio's library (read through OpenRouter's Fish
 // models); empty until they choose one.
 type Pref = Result<'loadVoicePref'>;
@@ -141,13 +154,37 @@ const sources: Sources = {
   idle: async () => ({ ok: true, error: '' }),
   loadPlaces: async (_a, store) => places(store),
   // Keeps the place, unless the book is finished (the last chapter, within its last half minute).
-  savePlace: async ([gen, book, title, author, cover, track, tracks, time, duration], store) => {
+  savePlace: async ([gen, book, title, author, cover, track, tracks, time, duration, at], store) => {
     const done = track >= tracks - 1 && duration > 0 && time >= duration - 30;
     const rest = places(store).filter((p) => p.gen !== gen);
-    const kept = done ? rest : [{ gen, book, title, author, cover, track, tracks, time, duration }, ...rest];
+    const kept = done ? rest : [{ gen, book, title, author, cover, track, tracks, time, duration, at }, ...rest];
     store.set(PLACES, JSON.stringify(kept.slice(0, 24)));
     return { ok: true, error: '' };
   },
+  // Home's shelf, six books: the ones in progress here, newest first, then the listener's own, then what is on Exalt.
+  loadShelf: async ([now], store, storage) => {
+    const shelf: Result<'loadShelf'> = [], seen = new Set<string>();
+    const put = (s: Result<'loadShelf'>[number]) => { if (shelf.length < 6 && !seen.has(s.book)) { seen.add(s.book); shelf.push(s); } };
+    for (const p of places(store)) put({ book: p.book, gen: p.gen, title: p.title, author: p.author, cover: p.cover,
+      chapter: `Chapter ${p.track + 1} of ${p.tracks}`, left: leftText(p), when: whenText(p.at, now), frac: fraction(p) });
+    if (shelf.length < 6) for (const m of await Promise.resolve(sources.loadMine([], store, storage)).catch(() => [])) {
+      const ready = m.status === 'ready';
+      put({ book: m.book, gen: ready ? m.gen : '', title: m.title, author: m.author, cover: m.cover, frac: 0, when: '',
+        chapter: ready ? `${m.total} ${m.total === 1 ? 'chapter' : 'chapters'}` : m.status === 'failed' ? 'Didn’t finish' : m.total ? `Voicing ${m.done} of ${m.total}…` : 'Preparing…', left: ready ? 'Not started' : '' });
+    }
+    if (shelf.length < 6) {
+      // What is on Exalt plays its first finished audiobook.
+      const on = (await Promise.resolve(sources.loadListening([], store, storage)).catch(() => [])).filter((b) => !seen.has(b.id)).slice(0, 6 - shelf.length);
+      const first = await Promise.all(on.map((b) => Promise.resolve(sources.loadBook([b.id], store, storage)).then((d) => d.versions.find((v) => v.status === 'ready')).catch(() => undefined)));
+      on.forEach((b, i) => put({ book: b.id, gen: first[i]?.id ?? '', title: b.title, author: b.author, cover: b.cover, frac: 0, when: '',
+        chapter: first[i] ? `${first[i]!.total} ${first[i]!.total === 1 ? 'chapter' : 'chapters'}` : b.versions === 1 ? '1 audiobook' : `${b.versions} audiobooks`, left: first[i] ? 'Not started' : '' }));
+    }
+    return shelf;
+  },
+  // Whether the server keeps accounts: the offline one (tests, a first run) has no provider to sign in with, so its door stays open. A server that doesn't say keeps it shut.
+  accountRequired: async () => ({ ok: (await get('/door').catch(() => ({})) as { required?: boolean }).required !== false, error: '' }),
+  // Whether this is the app (a native host) rather than the site.
+  isApp: async () => ({ ok: !onWeb(), error: '' }),
   loadVoicePref: async (_a, store) => {
     try { return { ...NO_VOICE, ...JSON.parse(store.get(VOICE) ?? '{}') }; } catch { return NO_VOICE; }
   },

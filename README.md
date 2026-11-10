@@ -11,7 +11,7 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
   plays chapter after chapter.
 
-Listening needs no account. Making an audiobook needs one: Sign in with Google.
+Exalt opens on Sign in with Google: nothing is reachable without an account (the offline server used by tests leaves the door open).
 
 Audiobooks are public. The upload form asks the uploader to confirm the book is in the public
 domain or that they hold the rights to share it.

@@ -94,6 +94,19 @@ shape Place
   tracks: number
   time: number
   duration: number
+  at: number
+
+// A book on Home's shelf, with the few words its controls show.
+shape Shelved
+  book: string
+  gen: string
+  title: string
+  author: string
+  cover: string
+  chapter: string
+  left: string
+  when: string
+  frac: number
 
 // An audiobook the signed-in listener made.
 shape Mine
@@ -130,6 +143,10 @@ shape Great
   author: string
   era: string
   cover: string
+
+shape Time
+  epochAtZero: number
+  utcOffset: number
 
 shape Viewport
   width: number
@@ -185,10 +202,14 @@ component App
   state dragging = false
   state moved = false
   state scrollY = 0
+  // A drag far enough to turn the book is felt as it crosses the line.
+  state armed = false
   derive n = greats.length
   derive wide = viewport.width >= 820
-  derive coverH = round(min(viewport.height * (wide ? 0.46 : 0.4), 440))
-  derive coverW = min(round(coverH / 1.55), round(viewport.width * 0.62))
+  // A phone gets the dock: the tabs and the book in progress, floating on glass over every main screen.
+  derive docked = not wide and fore == "" and (top(nav).name == "home" or top(nav).name == "explore" or top(nav).name == "voices" or top(nav).name == "book")
+  derive coverH = round(min(viewport.height * (wide ? (gated ? 0.42 : 0.46) : gated ? 0.45 : 0.4), 440))
+  derive coverW = min(round(coverH / 1.55), round(viewport.width * 0.66))
   derive focused = greats.slice(cur, cur + 1)
   derive still = viewport.prefersReducedMotion
   // 0 with the painting in full, 1 once it has scrolled most of the way off.
@@ -212,10 +233,33 @@ component App
   resource detail = loadBook(bookId) as shape BookDetail else empty()
   resource bookSources = loadBookSources(top(nav).name == "create" ? bookId : "") as shape BookSources else empty(available=false, files=[])
   resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
-  mutation created as shape Reply refreshes detail, listening, account, mine then afterCreate
+  mutation created as shape Reply refreshes detail, listening, account, mine, shelf then afterCreate
   // Home: where the listener left off, what they made, and the voice they read in.
   resource places = loadPlaces() as shape Place[] else empty()
-  mutation placed as shape Reply refreshes places
+  mutation placed as shape Reply refreshes places, shelf
+  // Home's shelf: six recent books; the one picked comes forward, with its controls under it.
+  resource time = exactTime() as shape Time
+  resource shelf = loadShelf() with time.epochAtZero as shape Shelved[] else empty()
+  state fore = ""
+  derive shelfCols = wide ? 6 : 3
+  derive shelfGap = wide ? 36 : 22
+  derive shelfW = min(viewport.width, 1080) - (wide ? 96 : 48)
+  derive bookW = min(floor((shelfW - shelfGap * (shelfCols - 1)) / shelfCols), floor(((viewport.height - 330) / 2 - 46) / 1.5))
+  derive bookH = round(bookW * 1.5)
+  derive rowH = bookH + 46
+  derive rowW = shelfCols * bookW + (shelfCols - 1) * shelfGap
+  derive pickScale = min(1.9, (wide ? 280 : viewport.width * 0.56) / max(1, bookW))
+  derive pickX = (rowW - bookW) / 2
+  derive pickY = round(viewport.height * 0.44) - (wide ? 230 : 212) - bookH / 2
+  derive shelfLeft = round((viewport.width - rowW) / 2)
+  derive shelfTop = wide ? "230px" : "calc(env(safe-area-inset-top) + 150px)"
+  // The app opens on signing in; the site lets anyone through to listen.
+  resource app = isApp() as shape Reply else empty(ok=false, error="")
+  // The door: where the server keeps accounts, nothing opens without signing in, on the site as in the app.
+  resource door = accountRequired() as shape Reply else empty(ok=true, error="")
+  derive gated = door.ok and not account.signedIn and identities.providers.google.active
+  // On a phone the door is a plain screen of its own: no painting, no wordmark.
+  derive phoneDoor = gated and not wide
   resource mine = loadMine() as shape Mine[] else empty()
   resource voicePref = loadVoicePref() as shape VoicePref else empty(id="", title="", cover="")
   mutation prefSet as shape Reply refreshes voicePref
@@ -236,8 +280,8 @@ component App
   resource account = currentAccount() as shape Account else empty(signedIn=false, name="")
   resource identities = getIdentityCapabilities() as shape IdentityCapabilities
   mutation nonce as shape Reply
-  mutation signedIn as shape Reply refreshes account, mine
-  mutation left as shape Reply refreshes account, mine
+  mutation signedIn as shape Reply refreshes account, mine, shelf
+  mutation left as shape Reply refreshes account, mine, shelf
   derive signInError = match signedIn { case some(r) => r.error, case none => "" }
   derive bookId = match stack(nav).filter(e => e.name == "book" or e.name == "create").at(-1) { case some(e) => e.params.id, case none => "" }
   derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }
@@ -278,6 +322,11 @@ component App
 
   task prepareIdentity mount
     after(1, getNonce)
+  // In the app, signing in opens Home, and signing out comes back to the door.
+  task entering when app.ok and account.signedIn and top(nav).name == "lander"
+    after(1, enter)
+  task barring when gated and top(nav).name != "lander"
+    after(1, toDoor)
 
   action getNonce
     send nonce = identityNonce()
@@ -292,6 +341,7 @@ component App
       refresh detail
     if mineWorking
       refresh mine
+      refresh shelf
   action search(v: string)
     query = v
     suggestOpen = true
@@ -323,6 +373,7 @@ component App
   action next
     if n > 0
       cur = (cur + 1) % n
+      haptic("selection")
   action prev
     if n > 0
       cur = (cur + n - 1) % n
@@ -344,6 +395,10 @@ component App
     dragX = dx
     dragY = dy
     moved = moved or max(mag(dx), mag(dy)) > 6
+    let over = mag(dx) > 70
+    if over and not armed
+      haptic("impact-light")
+    armed = over
   // A throw to the left turns to the next book, to the right back to the last; a short one settles.
   action dropBook(vx: number, vy: number)
     if n > 0 and (dragX < -70 or vx < -600)
@@ -351,6 +406,7 @@ component App
     else if n > 0 and (dragX > 70 or vx > 600)
       cur = (cur + n - 1) % n
     dragging = false
+    armed = false
     dragX = 0
     dragY = 0
   action clearMoved
@@ -358,7 +414,26 @@ component App
   action scrolled(x: number, y: number)
     scrollY = y
   action enter
-    nav = push(nav, path("home"))
+    if top(nav).name == "lander"
+      nav = push(nav, path("home"))
+  action toDoor
+    fore = ""
+    nav = go(nav, path("lander"))
+  action pick(id: string)
+    fore = fore == id ? "" : id
+    haptic("impact-light")
+  action unpick
+    fore = ""
+  // The picked book plays where it left off; one with nothing to play yet opens its page.
+  action playPicked(s: Shelved)
+    fore = ""
+    if s.gen != ""
+      listen(s.gen)
+    else
+      nav = push(nav, path("book", s.book))
+  action openPicked(s: Shelved)
+    fore = ""
+    nav = push(nav, path("book", s.book))
   // A book on the stack opens Explore searching for it.
   action seek(g: Great)
     query = g.title
@@ -400,6 +475,7 @@ component App
       send created = createAudiobook(bookId, filePath, fileName, sourceId, model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
   action afterCreate
     refusal = createError
+    haptic(createError == "" ? "success" : "error")
     if createError == "" and top(nav).name == "create"
       nav = back(nav)
   // Listening picks up where this device left off, if it has been here before.
@@ -418,6 +494,7 @@ component App
     else
       nav = push(nav, path("book", m.book))
   action playTrack(i: number)
+    haptic("selection")
     track = i
     now = 0
     duration = 0
@@ -445,7 +522,7 @@ component App
     keepAt(track, now, duration)
   action keepAt(tr: number, t: number, d: number)
     if audiobook.id != "" and audiobook.id == genId
-      send placed = savePlace(audiobook.id, audiobook.book, audiobook.title, audiobook.author, audiobook.cover, tr, audiobook.tracks.length, t, d)
+      send placed = savePlace(audiobook.id, audiobook.book, audiobook.title, audiobook.author, audiobook.cover, tr, audiobook.tracks.length, t, d, time.epochAtZero + performanceNow())
   action tick(t: number)
     now = t
   action gotDuration(d: number)
@@ -470,6 +547,7 @@ component App
     fastSeek("player-audio", min(max(0, duration - 1), now + 30))
   action cycleRate
     rate = nextRate(rate)
+    haptic("selection")
   // Voices: browse or search Fish Audio's community library, hear a sample, choose one.
   action editVoiceQuery(v: string)
     voiceQuery = v
@@ -487,16 +565,18 @@ component App
   action auditionEnded
     auditioning = ""
   action chooseVoice(v: Voice)
+    haptic("success")
     send prefSet = setVoicePref(v.id, v.title, v.cover)
 
   view
-    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed testId="app" width="100%" height="100%"
+    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed testId="app" width="100%" height="100%" viewport-fit="cover" color-scheme="light" accent-color="#14171f"
       for e in stack(nav) key=e.id
         if e.name == "lander"
-          column navigationKey=`${e.id}` position="absolute" inset=0 overflow="hidden" background-color="#121419" testId="lander"
+          column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color=(phoneDoor ? "#eceef2" : "#121419") testId="lander"
+            status-bar-style=(lit ? "light-content" : "dark-content") status-bar-animation="fade"
             background-image="radial-gradient(ellipse closest-side at 50% 45%, rgba(120,128,150,0.16) 0%, rgba(120,128,150,0) 100%)"
             // The painting, behind everything, fading out and drifting up as the page scrolls.
-            view position="absolute" inset=0 pointer-events="none" opacity=(1 - fade) overflow="hidden"
+            view position="absolute" inset=0 pointer-events="none" opacity=(1 - fade) overflow="hidden" display=(phoneDoor ? "none" : "flex")
               image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH
                 translate=`0px ${round(-scrollY * 0.25)}px`
               view position="absolute" inset=0
@@ -508,135 +588,175 @@ component App
                   background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.9) 0%, rgba(250,250,252,0) 100%)"
                 view position="absolute" left="40%" bottom="-45%" width="60%" height="95%"
                   background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.85) 0%, rgba(250,250,252,0) 100%)"
-            scroll id="lander-scroll" position="absolute" top=0 left=0 width="100%" height="100%" scroll=scrolled
-              overflow-x="hidden" overflow-y="auto" scrollbar-width="none"
-              // The hero, over the painting: the line, and the stack of books to throw through.
-              column height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
-                gap=(wide ? 44 : 32) padding=(wide ? "72px 24px 40px" : "72px 20px 32px")
-                text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 text-align="center"
-                  font-size=(wide ? min(76, round(viewport.width * 0.052)) : 40) line-height=1.05 letter-spacing="-0.02em" color="#1b1f2b"
-                  opacity=max(0, 1 - fade * 1.5) animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
-                // Tap the top book to throw it aside, or swipe it away in any direction.
-                button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
-                  width=coverW height=coverH flex-shrink=0 touch-action="pan-y" pan=dragBook panrelease=dropBook cursor="grab"
-                  animation=(still ? "none" : "arrive 1.4s 0.35s cubic-bezier(.2,.7,.2,1) both")
-                  for g, i in greats key=g.id
-                    Volume(book=g, depth=depthOf(i, cur, n), n=n, i=i, w=coverW, h=coverH,
-                      dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
-                // The focused book's title, lifted off the painting by a soft pale halo, and the one thing to do with it.
-                for g in focused key=g.id
-                  column align-items="center" gap=14 padding-top=(wide ? 20 : 16) position="relative" opacity=max(0, 1 - fade * 1.5)
-                    animation=(still ? "none" : "inkIn 500ms cubic-bezier(.2,.7,.2,1) both")
-                    view position="absolute" left="-30%" right="-30%" top="-10%" bottom="-25%" pointer-events="none"
-                      background-image="radial-gradient(ellipse closest-side, rgba(242,242,246,0.7) 0%, rgba(242,242,246,0.35) 55%, rgba(242,242,246,0) 100%)"
-                    column align-items="center" gap=5 position="relative"
-                      text g.title font-family="Jost" font-weight=400 font-size=18 color="#14171f" text-align="center" line-clamp=1 testId="great-title"
-                      text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
-                    button press=seek(g) appearance="none" testId="seek" position="relative" padding="4px 0" cursor="pointer"
-                      text "Open in Exalt  →" font-family="Jost" font-weight=400 font-size=14 color="#14171f"
-                        border-bottom="1px solid rgba(20,23,31,0.35)" padding-bottom=2
-              // Below the fold, in the dark: what Exalt is, and signing up.
-              column min-height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
-                padding=(wide ? "120px 24px" : "96px 24px") gap=44 position="relative"
-                column max-width=640 align-items="center" gap=22 opacity=fade
-                  text "Exalt turns any book into audio in a voice you choose."
-                    font-family="Jost" font-weight=300 font-size=(wide ? 32 : 24) line-height=1.3 color="#eeebe4" text-align="center" testId="about"
-                  text "Generate, listen, and share for free."
-                    font-family="Jost" font-weight=400 font-size=(wide ? 17 : 15) line-height=1.6 color="#9a978f" text-align="center" max-width=520
-                column width="100%" max-width=300 align-items="stretch" gap=12 opacity=fade
-                  if account.signedIn
-                    text `Signed in as ${account.name}` font-family="Jost" font-size=15 color="#9a978f" text-align="center" testId="lander-account"
-                    link href=path("home") testId="lander-library" padding="13px 26px" border-radius=999 background-color="#eeebe4" display="flex" justify-content="center"
-                      text "Open the library" font-family="Jost" font-weight=500 font-size=15 color="#1b1f2b"
+            // On a phone the door is its own screen: the painting, the line, and one glass button.
+            if phoneDoor
+              column position="absolute" inset=0 box-sizing="border-box" justify-content="space-between" testId="door"
+                padding="calc(env(safe-area-inset-top) + 40px) 20px calc(env(safe-area-inset-bottom) + 20px)"
+                // The books are the screen: one line in the sky, and the stack, large, to tap or throw through.
+                column align-items="center" gap=34 flex=1 justify-content="center" padding-bottom=20
+                  text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=28 letter-spacing="-0.01em" color="#1b1f2b" text-align="center"
+                    animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
+                  button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
+                    width=coverW height=coverH flex-shrink=0 touch-action="pan-y" pan=dragBook panrelease=dropBook cursor="grab"
+                    animation=(still ? "none" : "arrive 1.2s 0.1s cubic-bezier(.2,.7,.2,1) both")
+                    for g, i in greats key=g.id
+                      Volume(book=g, depth=depthOf(i, cur, n), n=n, i=i, w=coverW, h=coverH,
+                        dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
+                column gap=12 align-items="stretch" animation=(still ? "none" : "arrive 1s 0.45s cubic-bezier(.2,.7,.2,1) both")
+                  if signInError != ""
+                    text signInError color="#7a241c" font-family="Jost" font-size=14 text-align="center" testId="door-error"
+                  // The site needs Exact's button (it holds the popup at the press); the app's is its own, on glass.
+                  if app.ok
+                    button press=googleSignIn testId="door-google" class=Chip height=58 border-radius=18 backgroundMaterial="glass" box-shadow="0 18px 40px -18px rgba(20,24,36,0.45)" -exact-press-haptic="impact-medium"
+                      text "Get started" font-family="system-ui" font-weight=600 font-size=17 color="#14171f"
                   else
-                    if identities.providers.google.active
-                      exact-sign-in-button provider="google" press=googleSignIn testId="lander-google" width="100%" height=46
-                    if signInError != ""
-                      text signInError color="#e8837b" font-family="Jost" font-size=14 text-align="center" testId="lander-sign-in-error"
-                    link href=path("home") testId="lander-library" padding="10px 0" display="flex" justify-content="center"
-                      text "Or just listen  →" font-family="Jost" font-size=15 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
-                // The credit, at the foot of the page.
-                row align-items="center" justify-content="center" gap=5 position="absolute" left=0 right=0 bottom=(wide ? 32 : 24) opacity=fade testId="credit"
-                  text "Made with" font-family="Jost" font-size=13 color="#9a978f"
-                  text "♥" font-size=13 color="#e8837b" aria-label="love"
-                  text "by" font-family="Jost" font-size=13 color="#9a978f"
-                  link href="https://devinliu.xyz" testId="credit-link"
-                    text "Devin Liu" font-family="Jost" font-size=13 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
-            header display="flex" align-items="center" padding=(wide ? "28px 7vw" : "18px 24px") position="absolute" top=0 left=0 right=0 z-index=5
-              background-color="transparent" border-bottom="none" pointer-events="none"
-              view flex=1
+                    exact-sign-in-button provider="google" theme="filled_black" shape="pill" press=googleSignIn testId="door-google" width="100%" height=52
+            else
+              scroll id="lander-scroll" position="absolute" top=0 left=0 width="100%" height="100%" scroll=scrolled
+                overflow-x="hidden" overflow-y=(gated ? "hidden" : "auto") scrollbar-width="none"
+                // The hero, over the painting: the line, and the stack of books to throw through.
+                column height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
+                  gap=(wide ? 44 : gated ? 26 : 32) padding=(wide ? "72px 24px 40px" : "96px 20px 32px")
+                  text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 text-align="center"
+                    font-size=(wide ? min(76, round(viewport.width * 0.052)) : 40) line-height=1.05 letter-spacing="-0.02em" color="#1b1f2b"
+                    opacity=max(0, 1 - fade * 1.5) animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
+                  // Tap the top book to throw it aside, or swipe it away in any direction.
+                  button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
+                    width=coverW height=coverH flex-shrink=0 touch-action="pan-y" pan=dragBook panrelease=dropBook cursor="grab"
+                    animation=(still ? "none" : "arrive 1.4s 0.35s cubic-bezier(.2,.7,.2,1) both")
+                    for g, i in greats key=g.id
+                      Volume(book=g, depth=depthOf(i, cur, n), n=n, i=i, w=coverW, h=coverH,
+                        dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
+                  // The focused book's title, lifted off the painting by a soft pale halo, and the one thing to do with it.
+                  for g in focused key=g.id
+                    column align-items="center" gap=16 padding-top=(wide ? 20 : 16) position="relative" opacity=max(0, 1 - fade * 1.5)
+                      animation=(still ? "none" : "inkIn 500ms cubic-bezier(.2,.7,.2,1) both")
+                      view position="absolute" left="-30%" right="-30%" top="-10%" bottom="-25%" pointer-events="none"
+                        background-image="radial-gradient(ellipse closest-side, rgba(242,242,246,0.7) 0%, rgba(242,242,246,0.35) 55%, rgba(242,242,246,0) 100%)"
+                      column align-items="center" gap=5 position="relative"
+                        text g.title font-family="Jost" font-weight=400 font-size=18 color="#14171f" text-align="center" line-clamp=1 testId="great-title"
+                        text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
+                      if not gated
+                        button press=seek(g) testId="seek" position="relative" class=Chip backgroundMaterial="glass"
+                          text "Open in Exalt" font-family="Jost" font-weight=400 font-size=15 color="#14171f"
+                          image "symbol:forward-chevron" color="#14171f" width=11 height=11
+                  // The door: Google's own button, the one way in.
+                  if gated
+                    column align-items="center" gap=10 width="100%" max-width=300 position="relative" opacity=max(0, 1 - fade * 1.5) testId="door"
+                      exact-sign-in-button provider="google" theme="filled_black" shape="pill" press=googleSignIn testId="door-google" width="100%" height=48
+                      if signInError != ""
+                        text signInError color="#b2463c" font-family="Jost" font-size=14 text-align="center" testId="door-error"
+                // Below the fold, in the dark: what Exalt is, and signing up.
+                column min-height=viewport.height display=(gated ? "none" : "flex") box-sizing="border-box" align-items="center" justify-content="center"
+                  padding=(wide ? "120px 24px" : "96px 24px") gap=44 position="relative"
+                  column max-width=640 align-items="center" gap=22 opacity=fade
+                    text "Exalt turns any book into audio in a voice you choose."
+                      font-family="Jost" font-weight=300 font-size=(wide ? 32 : 24) line-height=1.3 color="#eeebe4" text-align="center" testId="about"
+                    text "Generate, listen, and share for free."
+                      font-family="Jost" font-weight=400 font-size=(wide ? 17 : 15) line-height=1.6 color="#9a978f" text-align="center" max-width=520
+                  column width="100%" max-width=300 align-items="stretch" gap=12 opacity=fade
+                    if account.signedIn
+                      text `Signed in as ${account.name}` font-family="Jost" font-size=15 color="#9a978f" text-align="center" testId="lander-account"
+                      link href=path("home") testId="lander-library" padding="13px 26px" border-radius=999 background-color="#eeebe4" display="flex" justify-content="center"
+                        -exact-press-scale=0.96 -exact-press-haptic="impact-light"
+                        text "Open the library" font-family="Jost" font-weight=500 font-size=15 color="#1b1f2b"
+                    else
+                      if identities.providers.google.active
+                        exact-sign-in-button provider="google" press=googleSignIn testId="lander-google" width="100%" height=46
+                      if signInError != ""
+                        text signInError color="#e8837b" font-family="Jost" font-size=14 text-align="center" testId="lander-sign-in-error"
+                      link href=path("home") testId="lander-library" padding="10px 0" display="flex" justify-content="center"
+                        text "Or just listen  →" font-family="Jost" font-size=15 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
+                  // The credit, at the foot of the page.
+                  row align-items="center" justify-content="center" gap=5 position="absolute" left=0 right=0 bottom=(wide ? 32 : 40) opacity=fade testId="credit"
+                    text "Made with" font-family="Jost" font-size=13 color="#9a978f"
+                    text "♥" font-size=13 color="#e8837b" aria-label="love"
+                    text "by" font-family="Jost" font-size=13 color="#9a978f"
+                    link href="https://devinliu.xyz" testId="credit-link"
+                      text "Devin Liu" font-family="Jost" font-size=13 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
+            row align-items="center" padding=(wide ? "28px 7vw" : "14px 20px 14px 24px") position="absolute" top="env(safe-area-inset-top)" left=0 right=0 z-index=5
+              pointer-events="none"
+              view flex=1 display=(phoneDoor ? "none" : "flex")
                 link href="/" testId="wordmark" pointer-events="auto" padding="6px 0"
                   text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
-              link href=path("home") testId="enter" padding="6px 0" pointer-events="auto"
-                text "Home" font-family="Jost" font-weight=400 font-size=15 letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
-        // Home: the painting as a faint band, then where you left off, what you made, and your voice.
+              if not gated
+                link href=path("home") testId="enter" pointer-events="auto" class=Chip backgroundMaterial="glass" color-scheme=(lit ? "dark" : "light")
+                  text "Home" font-family="Jost" font-weight=400 font-size=15 letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
+        // Home: a shelf in the fog. Six recent books; the one picked comes forward, its controls under it.
         if e.name == "home"
-          column navigationKey=`${e.id}` navigationScroll="home-scroll" position="absolute" inset=0 background-color="#eceef2" testId="home"
-            scroll id="home-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
-              view position="relative" height=(wide ? 320 : 240) overflow="hidden" flex-shrink=0
-                image "assets/lander.jpg" alt="" position="absolute" top=0 left=0 width="100%" height="100%" object-fit="cover"
-                view position="absolute" inset=0 background-image="linear-gradient(180deg, rgba(236,238,242,0.1) 0%, rgba(236,238,242,0.5) 55%, #eceef2 100%)"
-                column position="absolute" left=0 right=0 bottom=(wide ? 36 : 24) align-items="center" padding="0 20px"
-                  text (account.signedIn ? `Welcome back, ${account.name}` : "Welcome") role="heading" aria-level=1 font-family="Jost" font-weight=300
-                    font-size=(wide ? 52 : 34) letter-spacing="-0.02em" color="#14171f" text-align="center" line-clamp=1 testId="home-title"
-                    animation=(still ? "none" : "inkIn 800ms cubic-bezier(.2,.7,.2,1) both")
-              column margin="0 auto" width="100%" max-width=1080 box-sizing="border-box" padding=(wide ? "24px 48px 96px" : "16px 20px 72px") gap=(wide ? 64 : 48)
-                column gap=20
-                  SectionTitle(label="Continue listening")
-                  if places.length == 0
-                    column gap=10 align-items="flex-start" testId="no-places"
-                      text "Nothing in progress yet." font-family="Jost" font-weight=300 font-size=22 color="#14171f"
-                      link href=path("explore") testId="home-explore"
-                        text "Find something in Explore  →" font-family="Jost" font-size=15 color="#14171f" border-bottom="1px solid rgba(20,23,31,0.3)" padding-bottom=2
-                  else
-                    scroll overflow-x="auto" overflow-y="hidden" scrollbar-width="none" margin=(wide ? "0 -48px" : "0 -20px")
-                      row gap=(wide ? 32 : 22) padding=(wide ? "4px 48px 18px" : "4px 20px 18px") align-items="flex-start"
-                        for p in places key=p.gen
-                          PlaceCard(place=p, resume=resume)
-                column gap=20
-                  SectionTitle(label="Your books")
-                  if not account.signedIn
-                    column gap=12 align-items="flex-start" max-width=320 testId="mine-signed-out"
-                      text "Sign in to keep the audiobooks you make here." font-family="Jost" font-weight=300 font-size=20 color="#14171f" line-height=1.35
-                      if identities.providers.google.active
-                        exact-sign-in-button provider="google" press=googleSignIn testId="home-google" width="100%" height=44
-                      if signInError != ""
-                        text signInError color="#b2463c" font-family="Jost" font-size=14
-                  else if mine.length == 0
-                    text "You haven’t voiced a book yet. Choose one in Explore and make its first audiobook." font-family="Jost" font-weight=300 font-size=20 color="#14171f" line-height=1.35 max-width=520 testId="no-mine"
-                  else
-                    view display="grid" grid-template-columns=(wide ? "repeat(auto-fill, minmax(160px, 1fr))" : "repeat(auto-fill, minmax(130px, 1fr))") gap=(wide ? 32 : 22)
-                      for m in mine key=m.gen
-                        MineCard(item=m, open=openMine, w=(wide ? 150 : 120))
-                column gap=20
-                  SectionTitle(label="Your voice")
-                  row gap=16 align-items="center" testId="your-voice"
-                    VoiceFace(title=voicePref.title, cover=voicePref.cover, size=56)
-                    column flex=1 min-width=0 gap=3
-                      text (voicePref.id == "" ? "No voice chosen yet" : voicePref.title) font-family="Jost" font-size=18 color="#14171f" line-clamp=1 testId="voice-name"
-                      text "Reads the audiobooks you make, from Fish Audio’s library." font-family="Jost" font-size=14 color="#6b7080" line-clamp=2
-                    link href=path("voices") testId="change-voice" flex-shrink=0
-                      text (voicePref.id == "" ? "Choose  →" : "Change  →") font-family="Jost" font-size=15 color="#14171f" border-bottom="1px solid rgba(20,23,31,0.3)" padding-bottom=2
-                if listening.length > 0
-                  column gap=20
-                    SectionTitle(label="On Exalt")
-                    view display="grid" grid-template-columns=(wide ? "repeat(auto-fill, minmax(160px, 1fr))" : "repeat(auto-fill, minmax(130px, 1fr))") gap=(wide ? 32 : 22)
-                      for b in listening key=b.id
-                        BookCard(book=b, w=(wide ? 150 : 120))
-            TopBar(active="home", wide=wide)
+          column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color="#eceef2" status-bar-style="dark-content" testId="home"
+            image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH pointer-events="none"
+            view position="absolute" inset=0 pointer-events="none"
+              background-image="linear-gradient(180deg, rgba(236,238,242,0.2) 0%, rgba(236,238,242,0.72) 34%, rgba(236,238,242,0.9) 100%)"
+            column position="absolute" left=0 right=0 top=(wide ? "96px" : "calc(env(safe-area-inset-top) + 20px)") padding=(wide ? "0 48px" : "0 24px") gap=(wide ? 10 : 30) align-items=(wide ? "center" : "flex-start")
+              if not wide
+                text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color="#14171f"
+              text (account.signedIn ? `Welcome back, ${account.name}` : "Welcome") role="heading" aria-level=1 font-family="Jost" font-weight=300
+                font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f" line-clamp=1 testId="home-title"
+                animation=(still ? "none" : "inkIn 800ms cubic-bezier(.2,.7,.2,1) both")
+            if account.signedIn and not wide
+              button popovertarget="account-menu" aria-label="Account" testId="account-button" class=Round backgroundMaterial="glass" position="absolute" top="calc(env(safe-area-inset-top) + 8px)" right=16
+                image "symbol:person" color="#14171f" width=18 height=18
+              column id="account-menu" popover="auto" role="menu" aria-label=account.name
+                button press=signOut destructive=true popovertarget="account-menu" popovertargetaction="hide" testId="home-sign-out"
+                  text "Sign Out"
+            if shelf.length == 0
+              column position="absolute" left=0 right=0 top="45%" align-items="center" testId="no-places"
+                if not pending(shelf)
+                  link href=path("explore") testId="home-explore" class=Chip backgroundMaterial="glass"
+                    image "symbol:search" color="#14171f" width=15 height=15
+                    text "Find a book" font-family="Jost" font-size=15 color="#14171f"
+            else
+              // The ledges the books stand on.
+              view position="absolute" left=(shelfLeft - 14) top=shelfTop width=(rowW + 28) height=12 translate=`0px ${bookH + 5}px` border-radius=6 backgroundMaterial="glass" class=Lift pointer-events="none" testId="shelf"
+              if shelf.length > shelfCols
+                view position="absolute" left=(shelfLeft - 14) top=shelfTop width=(rowW + 28) height=12 translate=`0px ${rowH + bookH + 5}px` border-radius=6 backgroundMaterial="glass" class=Lift pointer-events="none"
+              // Everything but the picked book steps back behind a veil; a tap on it puts the book away.
+              button press=unpick appearance="none" aria-label="Put back" testId="veil" position="absolute" inset=0 padding=0 border-radius=0 cursor="default" z-index=5
+                background-color="rgba(236,238,242,0.86)" opacity=(fore != "" ? 1 : 0) pointer-events=(fore != "" ? "auto" : "none") transition="opacity 320ms ease"
+              for s, i in shelf key=s.book
+                button press=pick(s.book) appearance="none" aria-label=s.title testId=`shelf-${s.book}` padding=0 cursor="pointer" position="absolute" left=shelfLeft top=shelfTop width=bookW height=bookH
+                  z-index=(s.book == fore ? 8 : 2)
+                  translate=(s.book == fore ? `${pickX}px ${pickY}px` : `${(i % shelfCols) * (bookW + shelfGap)}px ${floor(i / shelfCols) * rowH}px`)
+                  scale=(s.book == fore ? pickScale : 1)
+                  transition=(still ? "none" : "translate 620ms cubic-bezier(.2,.9,.25,1.06), scale 620ms cubic-bezier(.2,.9,.25,1.06)")
+                  BookCover(src=s.cover, title=s.title, w=bookW)
+              // The picked book's controls, on glass at the foot of the screen.
+              for s in shelf.filter(x => x.book == fore) key=s.book
+                column position="absolute" left=16 right=16 bottom="calc(env(safe-area-inset-bottom) + 12px)" z-index=9 margin="0 auto" max-width=440 gap=14 padding="18px 18px 18px 22px" border-radius=34
+                  backgroundMaterial="glass" class=Lift testId="picked" animation=(still ? "none" : "arrive 480ms cubic-bezier(.2,.7,.2,1) both")
+                  row align-items="center" gap=14
+                    button press=openPicked(s) appearance="none" padding=0 text-align="start" cursor="pointer" flex=1 min-width=0 testId="picked-open" -exact-press-opacity=0.6
+                      column gap=3
+                        text s.title font-family="Jost" font-weight=400 font-size=20 color="#14171f" line-clamp=1 testId="picked-title"
+                        text s.author.toUpperCase() font-family="Jost" font-weight=500 font-size=10 letter-spacing="0.24em" color="#6b7080" line-clamp=1
+                    button press=playPicked(s) appearance="none" aria-label=(s.gen != "" ? "Play" : "Open") testId="picked-play" width=58 height=58 min-width=58 padding=0 flex-shrink=0 border-radius=999
+                      display="flex" align-items="center" justify-content="center" background-color="#14171f" cursor="pointer" box-shadow="0 14px 30px -12px rgba(20,23,31,0.55)"
+                      -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
+                      image (s.gen != "" ? "symbol:play-fill" : "symbol:forward-chevron") color="#f4f2ec" width=20 height=20
+                  if s.gen != ""
+                    view height=3 background-color="rgba(20,23,31,0.12)" border-radius=2
+                      view height=3 width=`${round(s.frac * 100)}%` background-color="#14171f" border-radius=2
+                  row justify-content="space-between" gap=12
+                    text (s.left != "" ? s.left : s.chapter) font-family="Jost" font-size=13 color="#14171f" line-clamp=1 testId="picked-left"
+                    text (s.when != "" ? s.when : s.left != "" ? s.chapter : "") font-family="Jost" font-size=13 color="#6b7080" line-clamp=1 testId="picked-when"
+            if wide
+              TopBar(active="home")
         // Explore: search every book, with suggestions under the field as you type.
         if e.name == "explore"
-          column navigationKey=`${e.id}` navigationScroll="explore-scroll" position="absolute" inset=0 background-color="#eceef2" testId="explore"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="explore-scroll" position="absolute" inset=0 background-color="#eceef2" status-bar-style="dark-content" testId="explore"
+            Mist()
             scroll id="explore-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
-              column margin="0 auto" width="100%" max-width=(asked != "" ? 760 : 1080) box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "88px 20px 72px") gap=(wide ? 48 : 36)
+              view height="env(safe-area-inset-top)" flex-shrink=0
+              column margin="0 auto" width="100%" max-width=(asked != "" ? 760 : 1080) box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "28px 20px 200px") gap=(wide ? 48 : 30)
                 column gap=18 position="relative" z-index=2
-                  text "Explore" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
+                  text "Explore" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 38) letter-spacing="-0.02em" color="#14171f"
                   column position="relative" width="100%" max-width=640
                     SearchField(value=query, hint="Search by title or author", label="Search Books", id="search", focused=fieldOn, busy=(searching or suggesting), still=still, big=wide,
                       edit=search, enter=ask, focus=fieldFocus, blur=fieldBlur, clear=clearSearch)
                     if showSuggestions
                       column role="listbox" aria-label="Suggestions" testId="suggestions" position="absolute" top="100%" left=0 right=0 margin-top=8 z-index=10
-                        background-color="#f7f8fa" border-radius=10 overflow="hidden" box-shadow="0 18px 40px -12px rgba(20,24,36,0.35)" padding="6px 0"
+                        backgroundMaterial="glass" border-radius=24 overflow="hidden" box-shadow="0 18px 40px -12px rgba(20,24,36,0.35)" padding="8px 0"
                         for b in suggestions.slice(0, 6) key=b.id
                           SuggestionRow(book=b)
                 if asked != ""
@@ -655,17 +775,20 @@ component App
                       for b, i in found key=b.id
                         view animation=(still ? "none" : `inkIn 420ms ${min(i, 10) * 45}ms cubic-bezier(.2,.7,.2,1) both`)
                           ResultRow(book=b)
-            TopBar(active="explore", wide=wide)
+            if wide
+              TopBar(active="explore")
         // Voices: a recommended set to start, and Fish Audio's whole community library by search.
         if e.name == "voices"
-          column navigationKey=`${e.id}` navigationScroll="voices-scroll" position="absolute" inset=0 background-color="#eceef2" testId="voices"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="voices-scroll" position="absolute" inset=0 background-color="#eceef2" status-bar-style="dark-content" testId="voices"
+            Mist()
             scroll id="voices-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
-              column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "88px 20px 72px") gap=32
-                column gap=12
-                  text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
-                view width="100%" max-width=560
-                  SearchField(value=voiceQuery, hint="Search for more voices", label="Search Voices", id="voice-search", focused=voiceOn, busy=voiceBusy, still=still, big=false,
-                    edit=editVoiceQuery, enter=takeVoiceQuery, focus=voiceFocus, blur=voiceBlur, clear=clearVoiceQuery)
+              view height="env(safe-area-inset-top)" flex-shrink=0
+              column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "28px 20px 200px") gap=(wide ? 32 : 26)
+                column gap=18
+                  text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 38) letter-spacing="-0.02em" color="#14171f"
+                  view width="100%" max-width=560
+                    SearchField(value=voiceQuery, hint="Search voices", label="Search Voices", id="voice-search", focused=voiceOn, busy=voiceBusy, still=still, big=false,
+                      edit=editVoiceQuery, enter=takeVoiceQuery, focus=voiceFocus, blur=voiceBlur, clear=clearVoiceQuery)
                 if pending(voiceList) and voiceList.length == 0
                   column role="status" aria-label="Loading voices" testId="voices-loading"
                     for n in [0, 1, 2, 3, 4] key=n
@@ -682,49 +805,63 @@ component App
                           VoiceRow(voice=v, chosen=(v.id == voicePref.id), playing=(v.sample != "" and v.sample == auditioning), audition=audition, choose=chooseVoice)
                 if auditioning != ""
                   audio src=auditioning autoplay=true ended=auditionEnded testId="audition"
-            TopBar(active="home", wide=wide)
-        // A book: its cover, what it is, and the audiobooks made of it.
+            if wide
+              TopBar(active="home")
+        // A book: its cover, lit from behind by itself, what it is, and the audiobooks made of it.
         if e.name == "book"
-          column navigationKey=`${e.id}` navigationScroll="book-scroll" position="absolute" inset=0 background-color="#eceef2" testId="book"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="book-scroll" position="absolute" inset=0 background-color="#eceef2" status-bar-style="dark-content" testId="book"
+            if detail.book.id == e.params.id and detail.book.cover != ""
+              view position="absolute" top=0 left=0 right=0 height=(wide ? 520 : 460) overflow="hidden" pointer-events="none"
+                image detail.book.cover alt="" position="absolute" top="-20%" left="-20%" width="140%" height="140%" object-fit="cover" filter="blur(48px) saturate(1.4)" opacity=0.6
+                view position="absolute" inset=0 background-image="linear-gradient(180deg, rgba(236,238,242,0.25) 0%, rgba(236,238,242,0.6) 60%, #eceef2 100%)"
+            else
+              Mist()
             scroll id="book-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               if detail.book.id != e.params.id
                 column height=viewport.height justify-content="center" align-items="center"
                   progress aria-label="Loading" testId="book-loading"
               else
-                column margin="0 auto" width="100%" max-width=1000 box-sizing="border-box" padding=(wide ? "128px 48px 96px" : "88px 20px 72px") gap=(wide ? 56 : 36)
+                view height="env(safe-area-inset-top)" flex-shrink=0
+                column margin="0 auto" width="100%" max-width=1000 box-sizing="border-box" padding=(wide ? "128px 48px 96px" : "64px 20px 200px") gap=(wide ? 56 : 36)
                   view display="flex" flex-direction=(wide ? "row" : "column") gap=(wide ? 56 : 28) align-items=(wide ? "flex-start" : "center")
-                    BookCover(src=detail.book.cover, title=detail.book.title, w=(wide ? 260 : 180))
+                    view animation=(still ? "none" : "arrive 800ms cubic-bezier(.2,.7,.2,1) both")
+                      BookCover(src=detail.book.cover, title=detail.book.title, w=(wide ? 260 : 190))
                     column flex=1 min-width=0 gap=18 align-items=(wide ? "flex-start" : "center")
                       column gap=10 align-items=(wide ? "flex-start" : "center")
                         text detail.book.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 46 : 32) line-height=1.1 letter-spacing="-0.02em" color="#14171f" text-align=(wide ? "start" : "center") testId="book-title"
                         text (detail.book.year > 0 ? `${detail.book.author.toUpperCase()} · ${detail.book.year}` : detail.book.author.toUpperCase()) font-family="Jost" font-weight=500 font-size=12 letter-spacing="0.24em" color="#4a4f5c" text-align=(wide ? "start" : "center")
-                      row gap=22 align-items="center" flex-wrap="wrap" justify-content=(wide ? "flex-start" : "center") padding-top=6
+                      row gap=10 align-items="center" flex-wrap="wrap" justify-content=(wide ? "flex-start" : "center") padding-top=6
                         for v in ready.slice(0, 1) key=v.id
-                          button press=listen(v.id) appearance="none" testId="listen" padding="0 26px" height=46 border-radius=999 display="flex" align-items="center" gap=10 background-color="#14171f" cursor="pointer"
+                          button press=listen(v.id) testId="listen" class=Pill
                             image "symbol:play-fill" color="#f4f2ec" width=14 height=14
-                            text "Listen" font-family="Jost" font-weight=500 font-size=15 color="#f4f2ec"
+                            text "Listen" font-family="Jost" font-weight=500 font-size=16 color="#f4f2ec"
                         if ready.length == 0
-                          button press=openCreate appearance="none" testId="make" padding="0 26px" height=46 border-radius=999 display="flex" align-items="center" background-color="#14171f" cursor="pointer"
-                            text "Make the audiobook" font-family="Jost" font-weight=500 font-size=15 color="#f4f2ec"
+                          button press=openCreate testId="make" class=Pill
+                            image "symbol:sparkles" color="#f4f2ec" width=15 height=15
+                            text "Make the audiobook" font-family="Jost" font-weight=500 font-size=16 color="#f4f2ec"
                         else
-                          button press=openCreate appearance="none" testId="make" padding="4px 0" cursor="pointer"
-                            text "Make another  →" font-family="Jost" font-size=15 color="#14171f" border-bottom="1px solid rgba(20,23,31,0.3)" padding-bottom=2
-                        link href=goodreads(detail.book) testId="goodreads"
-                          text "Reviews on Goodreads  ↗" font-family="Jost" font-size=15 color="#4a4f5c"
+                          button press=openCreate aria-label="Make another" testId="make" class=Round width=50 height=50 backgroundMaterial="glass"
+                            image "symbol:add" color="#14171f" width=16 height=16
+                        link href=goodreads(detail.book) testId="goodreads" class=Chip height=50 backgroundMaterial="glass"
+                          text "Goodreads" font-family="Jost" font-size=15 color="#14171f"
                       if detail.book.description != ""
                         text detail.book.description white-space="pre-line" font-family="Jost" font-size=16 line-height=1.65 color="#2c3140" max-width=600 padding-top=10 testId="book-description"
                   column gap=16
                     SectionTitle(label="Audiobooks")
                     if detail.versions.length == 0
-                      text "No one has made an audiobook of this yet." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-versions"
+                      text "None yet." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-versions"
                     else
                       column
                         for v in detail.versions key=v.id
                           VersionRow(version=v, listen=listen)
-            TopBar(active="", wide=wide)
+            if wide
+              TopBar(active="")
+            else
+              button press=back aria-label="Back" testId="book-back" class=Round backgroundMaterial="glass" position="absolute" top="calc(env(safe-area-inset-top) + 8px)" left=16 z-index=5
+                image "symbol:back" color="#14171f" width=18 height=18
         // Making an audiobook: signed out, only the way in; signed in, the file, the voice and the consent.
         if e.name == "create"
-          column navigationKey=`${e.id}` navigationPresentation="modal" navigationScroll="create-form" position="absolute" inset=0 background-color="#eceef2" testId="create"
+          column navigationKey=`${e.id}` navigationBar="none" navigationPresentation="modal" navigationScroll="create-form" position="absolute" inset=0 background-color="#eceef2" testId="create"
             scroll id="create-form" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=640 box-sizing="border-box" padding=(wide ? "104px 48px 96px" : "80px 20px 72px") gap=(wide ? 44 : 36)
                 row gap=20 align-items="center"
@@ -814,69 +951,128 @@ component App
                 text "Cancel" font-family="Jost" font-size=15 color="#14171f"
               view flex=1
               text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color="#14171f"
-        // The player, in the dark below the lander's fold: the book, the chapter, and the controls.
+        // The player, in the dark: the cover lights the room, and the controls float on glass.
         if e.name == "play"
-          column navigationKey=`${e.id}` navigationScroll="player" position="absolute" inset=0 background-color="#121419" testId="player"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="player" position="absolute" inset=0 background-color="#121419" color-scheme="dark" status-bar-style="light-content" testId="player"
             background-image="radial-gradient(ellipse closest-side at 50% 32%, rgba(140,148,170,0.20) 0%, rgba(140,148,170,0) 100%)"
             if audiobook.id != e.params.gen
               column flex=1 justify-content="center" align-items="center"
                 progress aria-label="Loading" testId="player-loading"
             else
+              if audiobook.cover != ""
+                view position="absolute" top=0 left=0 right=0 height="78%" overflow="hidden" pointer-events="none"
+                  image audiobook.cover alt="" position="absolute" top="-20%" left="-20%" width="140%" height="140%" object-fit="cover" filter="blur(56px) saturate(1.5)" opacity=0.7
+                  view position="absolute" inset=0 background-image="linear-gradient(180deg, rgba(18,20,25,0.3) 0%, rgba(18,20,25,0.62) 55%, #121419 100%)"
               scroll id="player" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto" scrollbar-width="none"
-                column margin="0 auto" width="100%" max-width=560 box-sizing="border-box" padding=(wide ? "80px 32px 80px" : "72px 24px 64px") gap=(wide ? 32 : 40)
+                view height="env(safe-area-inset-top)" flex-shrink=0
+                column margin="0 auto" width="100%" max-width=560 box-sizing="border-box" padding=(wide ? "80px 32px 80px" : "68px 22px 64px") gap=(wide ? 32 : 30)
                   column align-items="center" gap=28
                     view animation=(still ? "none" : "arrive 900ms cubic-bezier(.2,.7,.2,1) both")
+                      scale=(held ? 0.92 : 1) transition="scale 500ms cubic-bezier(.2,.9,.3,1.15)"
                       BookCover(src=audiobook.cover, title=audiobook.title, w=playerCover)
                     column align-items="center" gap=8
-                      text audiobook.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 32 : 26) line-height=1.15 color="#eeebe4" text-align="center"
-                      text audiobook.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#9a978f" text-align="center"
-                      text trackTitle(audiobook, track) font-family="Jost" font-size=15 color="#c9c6be" text-align="center" line-clamp=1 padding-top=8 testId="now-playing"
+                      text audiobook.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 32 : 28) line-height=1.15 color="#eeebe4" text-align="center"
+                      text audiobook.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#b5b2aa" text-align="center"
+                      text trackTitle(audiobook, track) font-family="Jost" font-size=15 color="#d6d3cb" text-align="center" line-clamp=1 padding-top=8 testId="now-playing"
                   column gap=6
                     input type="range" min=0 max=max(1, round(duration)) step=1 value=round(now) input=scrub aria-label="Position" testId="scrub" width="100%" accent-color="#eeebe4"
                     row justify-content="space-between"
-                      text clock(now) font-family="Jost" font-size=12 color="#9a978f" testId="elapsed"
-                      text (duration > 0 ? `−${clock(duration - now)}` : "") font-family="Jost" font-size=12 color="#9a978f"
-                  row justify-content="center" align-items="center" gap=(wide ? 36 : 26)
-                    button press=cycleRate appearance="none" aria-label="Speed" testId="rate" width=48 padding="8px 0" cursor="pointer"
-                      text rateText(rate) font-family="Jost" font-weight=500 font-size=14 color="#c9c6be" text-align="center"
-                    button press=back15 appearance="none" aria-label="Back 15 seconds" testId="back15" padding=8 cursor="pointer"
+                      text clock(now) font-family="Jost" font-size=12 color="#b5b2aa" testId="elapsed"
+                      text (duration > 0 ? `−${clock(duration - now)}` : "") font-family="Jost" font-size=12 color="#b5b2aa"
+                  row justify-content="space-between" align-items="center" padding="10px 18px" border-radius=999 backgroundMaterial="glass"
+                    button press=cycleRate appearance="none" aria-label="Speed" testId="rate" width=48 padding="8px 0" cursor="pointer" -exact-press-scale=0.9
+                      text rateText(rate) font-family="Jost" font-weight=500 font-size=15 color="#eeebe4" text-align="center"
+                    button press=back15 appearance="none" aria-label="Back 15 seconds" testId="back15" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
                       image "symbol:skip-back-15" color="#eeebe4" width=28 height=28
                     button press=toggle appearance="none" aria-label=(held ? "Play" : "Pause") aria-keyshortcuts="Space" testId="toggle"
-                      width=72 height=72 min-width=72 padding=0 flex-shrink=0 border-radius=999 display="flex" align-items="center" justify-content="center" background-color="#eeebe4" cursor="pointer"
-                      box-shadow="0 14px 36px -10px rgba(0,0,0,0.6)"
-                      image (held ? "symbol:play-fill" : "symbol:pause-fill") color="#14171f" width=28 height=28
-                    button press=fwd30 appearance="none" aria-label="Forward 30 seconds" testId="fwd30" padding=8 cursor="pointer"
+                      width=68 height=68 min-width=68 padding=0 flex-shrink=0 border-radius=999 display="flex" align-items="center" justify-content="center" background-color="#eeebe4" cursor="pointer"
+                      box-shadow="0 14px 36px -10px rgba(0,0,0,0.6)" -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
+                      image (held ? "symbol:play-fill" : "symbol:pause-fill") color="#14171f" width=26 height=26
+                    button press=fwd30 appearance="none" aria-label="Forward 30 seconds" testId="fwd30" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
                       image "symbol:skip-forward-30" color="#eeebe4" width=28 height=28
-                    view width=48
-                  column gap=4 padding-top=8
-                    text "CHAPTERS" font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#9a978f" padding-bottom=8
+                    row width=48 justify-content="center"
+                      image "symbol:waveform" color=(held ? "#6f6d67" : "#eeebe4") width=20 height=20
+                  column padding="20px 20px 8px" border-radius=30 backgroundMaterial="glass"
+                    text "CHAPTERS" font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#b5b2aa" padding-bottom=8
                     for t in audiobook.tracks key=t.idx
-                      button press=playTrack(t.idx) appearance="none" text-align="start" display="flex" align-items="center" gap=16 padding="12px 0"
-                        border-bottom="1px solid rgba(238,235,228,0.08)" cursor="pointer" testId=`track-${t.idx}`
-                        text `${t.idx + 1}` font-family="Jost" font-size=13 color="#6f6d67" width=24
-                        text t.title flex=1 min-width=0 line-clamp=1 font-family="Jost" font-size=15 color=(t.idx == track ? "#eeebe4" : "#9a978f")
+                      button press=playTrack(t.idx) appearance="none" text-align="start" display="flex" align-items="center" gap=16 padding="13px 0"
+                        border-top="1px solid rgba(238,235,228,0.1)" cursor="pointer" testId=`track-${t.idx}` -exact-press-opacity=0.6
+                        text `${t.idx + 1}` font-family="Jost" font-size=13 color="#9a978f" width=24
+                        text t.title flex=1 min-width=0 line-clamp=1 font-family="Jost" font-size=16 color=(t.idx == track ? "#eeebe4" : "#b5b2aa")
                         if t.idx == track
                           image "symbol:waveform" color="#eeebe4" width=16 height=16
-                  text `Read by ${audiobook.model} · made by ${audiobook.by}` font-family="Jost" font-size=13 color="#6f6d67" text-align="center"
+                  text `${audiobook.model} · ${audiobook.by}` font-family="Jost" font-size=13 color="#6f6d67" text-align="center"
               if trackSrc(audiobook, track) != ""
                 audio id="player-audio" src=trackSrc(audiobook, track) paused=held playbackRate=rate preload="auto"
                   timeupdate=tick durationchange=gotDuration loadedmetadata=resumeAt ended=nextTrack play=played pause=stopped
                   metadata=MediaMetadata(title=trackTitle(audiobook, track), artist=audiobook.author, album=audiobook.title, artwork=audiobook.cover)
                   seekbackward=back15 seekforward=fwd30 nexttrack=nextTrack previoustrack=prevTrack testId="audio"
-            header display="flex" align-items="center" padding=(wide ? "24px 7vw" : "16px 20px") position="absolute" top=0 left=0 right=0 z-index=5
-              appearance="none" background-color="transparent" border-bottom="none" pointer-events="none"
-              button press=back appearance="none" aria-label="Back" testId="player-back" padding="6px 0" pointer-events="auto" display="flex" align-items="center" gap=8 cursor="pointer"
+            row align-items="center" padding=(wide ? "24px 7vw" : "8px 16px") position="absolute" top="env(safe-area-inset-top)" left=0 right=0 z-index=5 pointer-events="none"
+              button press=back aria-label="Back" testId="player-back" pointer-events="auto" class=Round backgroundMaterial="glass"
                 image "symbol:back" color="#eeebe4" width=18 height=18
               view flex=1
-              text "EXALT" font-family="Jost" font-weight=500 font-size=13 letter-spacing="0.5em" color="#6f6d67"
+              text "EXALT" font-family="Jost" font-weight=500 font-size=13 letter-spacing="0.5em" color="#b5b2aa" padding-right=8
+      // The dock, over every main screen on a phone: the book in progress, and the tabs.
+      if docked
+        column position="absolute" left=0 right=0 bottom=0 align-items="center" gap=10 pointer-events="none" z-index=20 testId="dock"
+          padding="0 16px clamp(14px, calc(env(safe-area-inset-bottom) - 8px), 40px)"
+          for p in (top(nav).name == "home" ? [] : places.slice(0, 1)) key=p.gen
+            button press=resume(p) appearance="none" aria-label=`Resume ${p.title}` testId="mini" pointer-events="auto" text-align="start" cursor="pointer"
+              width="100%" max-width=370 box-sizing="border-box" display="flex" align-items="center" gap=12 padding="8px 10px 8px 8px" border-radius=999
+              backgroundMaterial="glass" class=Lift -exact-press-scale=0.97 -exact-press-haptic="impact-light"
+              if p.cover != ""
+                image p.cover alt="" width=42 height=42 border-radius=999 object-fit="cover" flex-shrink=0
+              else
+                view width=42 height=42 border-radius=999 background-color="#2a2d36" flex-shrink=0
+              column flex=1 min-width=0 gap=1
+                text p.title font-family="Jost" font-size=15 color="#14171f" line-clamp=1
+                text `Chapter ${p.track + 1} of ${p.tracks}` font-family="Jost" font-size=12 color="#6b7080" line-clamp=1
+              view width=38 height=38 border-radius=999 background-color="#14171f" display="flex" align-items="center" justify-content="center" flex-shrink=0
+                image "symbol:play-fill" color="#f4f2ec" width=13 height=13
+          row padding=5 gap=2 border-radius=999 backgroundMaterial="glass" class=Lift pointer-events="auto" role="navigation"
+            DockTab(to=path("home"), id="nav-home", label="Home", symbol=(top(nav).name == "home" ? "symbol:home-fill" : "symbol:home"), on=(top(nav).name == "home"))
+            DockTab(to=path("explore"), id="nav-explore", label="Explore", symbol="symbol:search", on=(top(nav).name == "explore"))
+            DockTab(to=path("voices"), id="nav-voices", label="Voices", symbol="symbol:waveform", on=(top(nav).name == "voices"))
+
+// What floats: a capsule to press, a round button, the ink pill of a screen's one main action.
+style Chip
+  appearance="none" display="flex" align-items="center" justify-content="center" gap=8 height=42 padding="0 18px" border-radius=999
+  box-sizing="border-box" flex-shrink=0 cursor="pointer" -exact-press-scale=0.95 -exact-press-haptic="selection"
+style Round
+  appearance="none" display="flex" align-items="center" justify-content="center" width=44 height=44 padding=0 border-radius=999
+  flex-shrink=0 cursor="pointer" -exact-press-scale=0.9 -exact-press-haptic="selection"
+style Pill
+  appearance="none" display="flex" align-items="center" justify-content="center" gap=10 height=50 padding="0 28px" border-radius=999
+  background-color="#14171f" cursor="pointer" box-shadow="0 14px 30px -12px rgba(20,23,31,0.55)" -exact-press-scale=0.95 -exact-press-haptic="impact-medium"
+style Lift
+  box-shadow="0 12px 30px -14px rgba(20,24,36,0.32)"
+
+// The painting as weather at the top of a light screen, thinning into the page.
+component Mist
+  view
+    view position="absolute" top=0 left=0 right=0 height=300 overflow="hidden" pointer-events="none"
+      image "assets/lander.jpg" alt="" position="absolute" top=0 left=0 width="100%" height="100%" object-fit="cover" opacity=0.75
+      view position="absolute" inset=0 background-image="linear-gradient(180deg, rgba(236,238,242,0.35) 0%, rgba(236,238,242,0.75) 55%, #eceef2 100%)"
+
+component DockTab
+  props
+    to: string
+    id: string
+    label: string
+    symbol: string
+    on: bool
+  view
+    link href=to testId=id aria-label=label aria-current=(on ? "page" : "false") -exact-press-scale=0.9 -exact-press-haptic="selection"
+      row align-items="center" justify-content="center" width=72 height=48 border-radius=999
+        background-color=(on ? "rgba(20,23,31,0.09)" : "rgba(20,23,31,0)") transition="background-color 200ms ease"
+        image symbol color=(on ? "#14171f" : "#6b7080") width=22 height=22
 
 component TopBar
   props
     active: string
-    wide: bool
   view
-    header display="flex" align-items="center" gap=(wide ? 30 : 20) padding=(wide ? "22px 7vw" : "14px 20px") position="absolute" top=0 left=0 right=0 z-index=5
-      appearance="none" background-color="rgba(236,238,242,0.72)" backdrop-filter="blur(14px)" border-bottom="1px solid rgba(20,23,31,0.06)"
+    row align-items="center" gap=30 padding="22px 7vw" position="absolute" top=0 left=0 right=0 z-index=5
+      background-color="rgba(236,238,242,0.72)" backdrop-filter="blur(14px)" border-bottom="1px solid rgba(20,23,31,0.06)"
       link href=path("lander") testId="nav-exalt"
         text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color="#14171f"
       view flex=1
@@ -915,7 +1111,7 @@ component BookCard
     book: Book
     w: number
   view
-    link href=path("book", book.id) testId=`book-${book.id}`
+    link href=path("book", book.id) testId=`book-${book.id}` -exact-press-scale=0.96 -exact-press-haptic="selection"
       column gap=10
         BookCover(src=book.cover, title=book.title, w=w)
         column gap=2
@@ -929,7 +1125,7 @@ component PlaceCard
     place: Place
     resume: action
   view
-    button press=resume(place) appearance="none" padding=0 text-align="start" cursor="pointer" flex-shrink=0 width=150 testId=`place-${place.gen}`
+    button press=resume(place) appearance="none" padding=0 text-align="start" cursor="pointer" flex-shrink=0 width=150 testId=`place-${place.gen}` -exact-press-scale=0.96 -exact-press-haptic="impact-light"
       column gap=10
         BookCover(src=place.cover, title=place.title, w=140)
         column gap=4
@@ -944,7 +1140,7 @@ component MineCard
     open: action
     w: number
   view
-    button press=open(item) appearance="none" padding=0 text-align="start" cursor="pointer" testId=`mine-${item.gen}`
+    button press=open(item) appearance="none" padding=0 text-align="start" cursor="pointer" testId=`mine-${item.gen}` -exact-press-scale=0.96 -exact-press-haptic="selection"
       column gap=10
         view position="relative" width=w
           BookCover(src=item.cover, title=item.title, w=w)
@@ -958,7 +1154,7 @@ component ResultRow
   props
     book: Book
   view
-    link href=path("book", book.id) testId=`book-${book.id}`
+    link href=path("book", book.id) testId=`book-${book.id}` -exact-press-opacity=0.55 -exact-press-haptic="selection"
       row gap=18 align-items="center" padding="14px 0" border-bottom="1px solid rgba(20,23,31,0.08)"
         BookCover(src=book.cover, title=book.title, w=48)
         column flex=1 min-width=0 gap=3
@@ -966,13 +1162,13 @@ component ResultRow
           text byline(book) font-family="Jost" font-size=14 color="#6b7080" line-clamp=1
           if book.versions > 0
             text versionsText(book.versions) font-family="Jost" font-size=13 color="#4a4f5c"
-        text "→" font-family="Jost" font-size=18 color="#9a9eab"
+        image "symbol:forward-chevron" color="#9a9eab" width=12 height=12
 
 component SuggestionRow
   props
     book: Book
   view
-    link href=path("book", book.id) role="option" testId=`suggest-${book.id}` padding="8px 14px"
+    link href=path("book", book.id) role="option" testId=`suggest-${book.id}` padding="8px 16px" -exact-press-opacity=0.55 -exact-press-haptic="selection"
       row gap=12 align-items="center" flex=1 min-width=0
         BookCover(src=book.cover, title=book.title, w=28)
         column flex=1 min-width=0 gap=1
@@ -986,7 +1182,7 @@ component VersionRow
   view
     if version.status == "ready"
       button press=listen(version.id) appearance="none" text-align="start" display="flex" align-items="center" gap=16 padding="16px 0"
-        border-bottom="1px solid rgba(20,23,31,0.08)" cursor="pointer" testId=`version-${version.id}`
+        border-bottom="1px solid rgba(20,23,31,0.08)" cursor="pointer" testId=`version-${version.id}` -exact-press-opacity=0.6 -exact-press-haptic="impact-medium"
         view width=40 height=40 border-radius=999 display="flex" align-items="center" justify-content="center" background-color="#14171f" flex-shrink=0
           image "symbol:play-fill" color="#f4f2ec" width=14 height=14
         column flex=1 min-width=0 gap=2
@@ -1027,15 +1223,13 @@ component VoiceRow
       column flex=1 min-width=0 gap=3
         text voice.title font-family="Jost" font-size=17 color="#14171f" line-clamp=1
         if voice.description != ""
-          text voice.description font-family="Jost" font-size=14 line-height=1.45 color="#6b7080" line-clamp=2
+          text voice.description font-family="Jost" font-size=14 color="#6b7080" line-clamp=1
       if voice.sample != ""
-        button press=audition(voice.sample) appearance="none" aria-label=(playing ? "Stop sample" : "Hear sample") testId=`hear-${voice.id}`
-          width=40 height=40 border-radius=999 display="flex" align-items="center" justify-content="center" border="1px solid rgba(20,23,31,0.25)" cursor="pointer" flex-shrink=0
-          image (playing ? "symbol:stop-fill" : "symbol:play-fill") color="#14171f" width=12 height=12
-      row width=88 justify-content="flex-end" flex-shrink=0
-        button press=choose(voice) appearance="none" testId=`use-${voice.id}` padding="4px 0" cursor="pointer"
-          text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
-            border-bottom=(chosen ? "1px solid transparent" : "1px solid rgba(20,23,31,0.3)") padding-bottom=2
+        button press=audition(voice.sample) aria-label=(playing ? "Stop sample" : "Hear sample") testId=`hear-${voice.id}` class=Round backgroundMaterial="glass"
+          image (playing ? "symbol:stop-fill" : "symbol:play-fill") color="#14171f" width=13 height=13
+      button press=choose(voice) testId=`use-${voice.id}` class=Chip height=40 padding="0 16px" min-width=64
+        backgroundMaterial=(chosen ? "none" : "glass") background-color=(chosen ? "#14171f" : "rgba(20,23,31,0)")
+        text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=500 font-size=14 color=(chosen ? "#f4f2ec" : "#14171f")
 
 // The search field: a lit box with a glass, that lifts on focus and shows its own working —
 // a turning ring where the clear button sits, and a line sweeping along its foot.
@@ -1056,10 +1250,9 @@ component SearchField
     clear: action
   view
     row position="relative" align-items="center" gap=12 width="100%" box-sizing="border-box" height=(big ? 60 : 54) padding="0 16px 0 18px"
-      border-radius=16 overflow="hidden" background-color=(focused ? "#ffffff" : "#f7f8fa")
-      border=(focused ? "1px solid rgba(20,23,31,0.55)" : "1px solid rgba(20,23,31,0.14)")
-      box-shadow=(focused ? "0 16px 36px -16px rgba(20,24,36,0.45)" : "0 6px 16px -12px rgba(20,24,36,0.35)")
-      transition="background-color 200ms ease, border-color 200ms ease, box-shadow 260ms ease"
+      border-radius=999 overflow="hidden" backgroundMaterial="glass"
+      box-shadow=(focused ? "0 16px 36px -16px rgba(20,24,36,0.45)" : "0 10px 26px -16px rgba(20,24,36,0.3)")
+      transition="box-shadow 260ms ease"
       image "symbol:search" color=(focused ? "#14171f" : "#6b7080") width=20 height=20 flex-shrink=0
       // A text field with a search keyboard: the box draws its own glass and clear button.
       input type="text" inputmode="search" enterkeyhint="search" autocomplete="off" value=value input=edit submit=enter focus=focus blur=blur placeholder=hint

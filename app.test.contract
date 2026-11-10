@@ -24,7 +24,7 @@ test "below the fold, the lander says what Exalt is and opens the library"
   clock data
   expect tree has "home"
   expect tree has "no-places"
-  expect tree has "mine-signed-out"
+  expect tree has "home-explore"
 
 test "an empty library says how to start"
   clock data
@@ -128,16 +128,16 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
   tap "enter"
   clock data
-  expect text "voice-name" == "No voice chosen yet"
-  tap "change-voice"
+  tap "nav-voices"
   clock data
   expect tree has "voice-v-reader"
+  expect text "use-v-reader" == "Use"
   tap "use-v-reader"
   clock data
   expect text "use-v-reader" == "✓ Selected"
   tap "nav-home"
   clock data
-  expect text "voice-name" == "The Reader"
+  expect tree has "home"
 
 test "signed out, making an audiobook shows only the sign-in, not the form"
   tap "enter"
