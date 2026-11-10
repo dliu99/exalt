@@ -339,7 +339,7 @@ component App
     scrollY = y
   action enter
     nav = push(nav, path("home"))
-  // A book on the stack (or the canon in Explore) opens Explore searching for it.
+  // A book on the stack opens Explore searching for it.
   action seek(g: Great)
     query = g.title
     asked = `${g.title} ${g.author}`
@@ -586,7 +586,7 @@ component App
                       for b in listening key=b.id
                         BookCard(book=b, w=(wide ? 150 : 120))
             TopBar(active="home", wide=wide)
-        // Explore: search every book; before a search, the canon and what others have voiced.
+        // Explore: search every book, with suggestions under the field as you type.
         if e.name == "explore"
           column navigationKey=`${e.id}` navigationScroll="explore-scroll" position="absolute" inset=0 background-color="#eceef2" testId="explore"
             scroll id="explore-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
@@ -615,23 +615,6 @@ component App
                     column
                       for b in found key=b.id
                         ResultRow(book=b)
-                else
-                  column gap=20
-                    SectionTitle(label="Start with the canon")
-                    view display="grid" grid-template-columns=(wide ? "repeat(auto-fill, minmax(150px, 1fr))" : "repeat(auto-fill, minmax(100px, 1fr))") gap=(wide ? 32 : 20)
-                      for g in greats key=g.id
-                        button press=seek(g) appearance="none" testId=`canon-${g.id}` padding=0 text-align="start" cursor="pointer"
-                          column gap=10
-                            BookCover(src=g.cover, title=g.title, w=(wide ? 140 : 96))
-                            column gap=2
-                              text g.title font-family="Jost" font-size=(wide ? 15 : 13) color="#14171f" line-clamp=2
-                              text g.author font-family="Jost" font-size=(wide ? 13 : 12) color="#6b7080" line-clamp=1
-                  if listening.length > 0
-                    column gap=20
-                      SectionTitle(label="Voiced on Exalt")
-                      view display="grid" grid-template-columns=(wide ? "repeat(auto-fill, minmax(150px, 1fr))" : "repeat(auto-fill, minmax(100px, 1fr))") gap=(wide ? 32 : 20)
-                        for b in listening key=b.id
-                          BookCard(book=b, w=(wide ? 140 : 96))
             TopBar(active="explore", wide=wide)
         // Voices: Fish Audio's licensed voices to start, and its whole community library by search.
         if e.name == "voices"
