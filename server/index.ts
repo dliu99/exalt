@@ -11,7 +11,7 @@ import { AUDIO_DIR, enqueue, reserve, failJob, QueueFull } from './jobs.ts';
 import { parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
 import { lg } from './libgen.ts';
-import { audioURL, validateAudioFile } from './storage.ts';
+import { audioType, audioURL, validateAudioFile } from './storage.ts';
 import { zlib } from './zlibrary.ts';
 import { listVoices } from './fish.ts';
 
@@ -200,8 +200,7 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     }
     const file = Bun.file(pathJoin(AUDIO_DIR, rel));
     if (!(await file.exists())) return new Response('Not found', { status: 404, headers: CORS });
-    const type = rel.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg';
-    const common = { ...CORS, 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'public, max-age=3600' };
+    const common = { ...CORS, 'content-type': audioType(rel), 'accept-ranges': 'bytes', 'cache-control': 'public, max-age=3600' };
     const rangeHeader = req.headers.get('range');
     if (!rangeHeader) return new Response(file, { headers: common });
     const range = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);

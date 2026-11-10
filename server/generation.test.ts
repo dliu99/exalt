@@ -46,8 +46,11 @@ test('a selected remote source requires sign-in and rights, then becomes playabl
     expect(generation.status).toBe('ready');
     expect(generation.tracks).toHaveLength(1);
     const audio = await fetch(`${address}${generation.tracks[0].src}`);
-    expect(audio.headers.get('content-type')).toBe('audio/wav');
-    expect((await audio.arrayBuffer()).byteLength).toBeGreaterThan(44);
+    // The silent model answers in WAV; what is stored and served is the compressed M4A.
+    expect(generation.tracks[0].src).toMatch(/\/0\.m4a$/);
+    expect(audio.headers.get('content-type')).toBe('audio/mp4');
+    const stored = new Uint8Array(await audio.arrayBuffer());
+    expect(new TextDecoder().decode(stored.subarray(4, 8))).toBe('ftyp');
     const partial = await fetch(`${address}${generation.tracks[0].src}`, { headers: { range: 'bytes=10-19' } });
     expect(partial.status).toBe(206);
     expect((await partial.arrayBuffer()).byteLength).toBe(10);
@@ -61,7 +64,9 @@ test('a selected remote source requires sign-in and rights, then becomes playabl
     expect(inspection.query('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 });
     expect(inspection.query('SELECT source_ref, length(source_hash) AS hash_length FROM generations WHERE id = ?').get(id))
       .toEqual({ source_ref: 'lg-00000000000000000000000000000001', hash_length: 64 });
-    expect(inspection.query('SELECT bytes, storage FROM tracks WHERE generation_id = ?').get(id)).toEqual({ bytes: 16044, storage: 'local' });
+    // Capacity counts what is stored: the M4A, not the 16 kB of PCM it was made from.
+    expect(inspection.query('SELECT bytes, storage FROM tracks WHERE generation_id = ?').get(id)).toEqual({ bytes: stored.length, storage: 'local' });
+    expect(stored.length).toBeLessThan(16044);
     // Active reservations, not just worker jobs, count toward admission limits.
     const uid = (inspection.query('SELECT id FROM users LIMIT 1').get() as { id: number }).id;
     for (let i = 0; i < 2; i++) inspection.query("INSERT INTO generations (book_id, user_id, made_by, model, voice, source_name, status, created_at) VALUES ('OL1W', ?, 'test', 'exalt/silence', '', 'test', 'queued', 0)").run(uid);

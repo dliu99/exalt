@@ -15,10 +15,14 @@ const s3 = storageKind === 's3' ? new S3Client({
   secretAccessKey: process.env.AUDIO_S3_SECRET_ACCESS_KEY,
 }) : null;
 const key = (file: string) => `audio/${file}`;
+// Chapters are stored as M4A (encode.ts); MP3 when the provider's was already small, and MP3 or
+// WAV from versions before compression, which still play.
+const TYPES: Record<string, string> = { m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav' };
 export function validateAudioFile(file: string) {
-  if (!/^\d+\/\d+\.(mp3|wav)$/.test(file)) throw new Error('Invalid audio key.');
+  if (!/^\d+\/\d+\.(m4a|mp3|wav)$/.test(file)) throw new Error('Invalid audio key.');
   return file;
 }
+export const audioType = (file: string) => TYPES[validateAudioFile(file).split('.').pop()!];
 export function requireDiskSpace() {
   const stat = statfsSync(AUDIO_DIR);
   if (stat.bavail * stat.bsize < 256 * 1024 * 1024) throw new Error('Audio storage is almost full. Try again after storage is expanded.');
@@ -26,7 +30,7 @@ export function requireDiskSpace() {
 export async function saveAudio(file: string, path: string): Promise<'s3' | 'local'> {
   validateAudioFile(file);
   if (s3) {
-    await s3.file(key(file)).write(Bun.file(path), { type: file.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg' });
+    await s3.file(key(file)).write(Bun.file(path), { type: audioType(file) });
     rmSync(path, { force: true });
     return 's3';
   }
