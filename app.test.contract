@@ -1,9 +1,38 @@
+test "the lander shows one book at a time, and turns through the stack"
+  clock data
+  expect text "hero-title" == "Give great words a voice"
+  expect text "great-title" == "The Odyssey"
+  tap "stack"
+  expect text "great-title" == "The Republic"
+  tap "stack"
+  expect text "great-title" == "The Nicomachean Ethics"
+
+test "a book on the lander opens the library searching for it"
+  clock data
+  tap "stack"
+  tap "seek"
+  clock data
+  expect state asked == "The Republic Plato"
+  expect tree has "search"
+
+test "below the fold, the lander says what Exalt is and opens the library"
+  clock data
+  expect tree has "about"
+  expect tree has "lander-apple"
+  expect tree has "lander-google"
+  tap "lander-library"
+  clock data
+  expect tree has "search"
+
 test "an empty library says how to start"
+  clock data
+  tap "enter"
   clock data
   expect tree has "app"
   expect tree missing "book-OL1W"
 
 test "search finds a book and opens its page"
+  tap "enter"
   type "search" "rivers"
   type "search" key "Enter"
   clock data
@@ -16,6 +45,7 @@ test "search finds a book and opens its page"
   expect tree missing "book-description"
 
 test "making an audiobook waits for a file and consent"
+  tap "enter"
   type "search" "harbour"
   type "search" key "Enter"
   clock data
@@ -28,6 +58,7 @@ test "making an audiobook waits for a file and consent"
   expect state model == "exalt/silence"
 
 test "making an audiobook asks for an account, with Apple's and Google's buttons"
+  tap "enter"
   type "search" "harbour"
   type "search" key "Enter"
   clock data
@@ -42,6 +73,7 @@ test "making an audiobook asks for an account, with Apple's and Google's buttons
   expect tree missing "sign-out"
 
 test "typing suggests books under the field, and one opens its page"
+  tap "enter"
   type "search" "r"
   clock +300
   clock data
@@ -58,6 +90,7 @@ test "typing suggests books under the field, and one opens its page"
   expect text "book-title" == "Notes on Rivers"
 
 test "enter shows every result and closes the suggestions"
+  tap "enter"
   type "search" "rivers"
   clock +300
   clock data

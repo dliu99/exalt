@@ -6,11 +6,19 @@ use EmptyState from "exact:content"
 use getIdentityCapabilities, IdentityCapabilities from "@exact/sign-in"
 use getClientCapabilities, ClientCapabilities from "@exact/passkeys"
 
+// The lander's face: Jost (SIL Open Font License), cut to static weights.
+font "Jost"
+  300 = "assets/fonts/Jost-Light.ttf"
+  300 italic = "assets/fonts/Jost-LightItalic.ttf"
+  400 = "assets/fonts/Jost-Regular.ttf"
+  500 = "assets/fonts/Jost-Medium.ttf"
+
 routes nav
-  home "/"
-    book "/book/:id"
-      create "/book/:id/create"
-    play "/play/:gen"
+  lander "/"
+    home "/library"
+      book "/book/:id"
+        create "/book/:id/create"
+      play "/play/:gen"
 
 shape Book
   id: string
@@ -63,6 +71,32 @@ shape Account
   signedIn: bool
   name: string
 
+// One of the lander's great books: its Penguin cover ships in assets/covers.
+shape Great
+  id: string
+  title: string
+  author: string
+  era: string
+  cover: string
+
+shape Viewport
+  width: number
+  height: number
+  prefersReducedMotion: bool
+
+// The lander's stack. A book's depth is how far below the top it lies (0 is the one in focus);
+// the last depth is the book just turned away, thrown off to the left, so going back brings it
+// down onto the top again. The rest settle under the top at a slant of their own.
+fn depthOf(i: number, cur: number, n: number): number = (i - cur + n) % n
+fn gone(d: number, n: number): bool = d == n - 1 and n > 1
+fn slant(i: number): number = ((i * 47) % 13 - 6) * 0.85
+fn volX(d: number, n: number, i: number, w: number): number = gone(d, n) ? -w * 2.1 : d == 0 ? 0 : ((i * 29) % 9 - 4) * 4
+fn volY(d: number, n: number, h: number): number = gone(d, n) ? -h * 0.12 : min(d, 5) * 8
+fn volRot(d: number, n: number, i: number): number = gone(d, n) ? -26 : d == 0 ? slant(i) * 0.2 : slant(i)
+fn volOpacity(d: number, n: number): number = gone(d, n) ? 0 : d > 5 ? 0 : 1
+fn volZ(d: number, n: number): number = gone(d, n) ? n + 1 : n - d
+fn mag(x: number): number = max(x, -x)
+
 fn byline(b: Book): string = b.year > 0 ? `${b.author} · ${b.year}` : b.author
 fn versionsText(n: number): string = n == 0 ? "" : n == 1 ? "1 audiobook" : `${n} audiobooks`
 fn statusText(v: Version): string = v.status == "ready" ? `${v.total} ${v.total == 1 ? "chapter" : "chapters"}` : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : `Voicing ${v.done} of ${v.total}…`
@@ -81,6 +115,30 @@ component App
   state rights = false
   state refusal = ""
   state track = 0
+  // The lander: a hero over the painting, and a stack of books lying across the fold. Scrolling
+  // fades the painting out and brings the stack into focus, one book at a time.
+  resource greats = loadGreats() as shape Great[] else empty()
+  resource viewport = exactViewport() as shape Viewport
+  state cur = 0
+  state dragX = 0
+  state dragY = 0
+  state dragging = false
+  state moved = false
+  state scrollY = 0
+  derive n = greats.length
+  derive wide = viewport.width >= 820
+  derive coverH = round(min(viewport.height * (wide ? 0.46 : 0.4), 440))
+  derive coverW = min(round(coverH / 1.55), round(viewport.width * 0.62))
+  derive focused = greats.slice(cur, cur + 1)
+  derive still = viewport.prefersReducedMotion
+  // 0 with the painting in full, 1 once it has scrolled most of the way off.
+  derive fade = min(1, max(0, scrollY / max(1, viewport.height * 0.6)))
+  derive lit = fade > 0.5
+  // The painting covers the screen. On a narrow one it is drawn a little taller and slides
+  // so the wanderer stands at the right, under the book's name.
+  derive paintH = wide ? max(viewport.height, viewport.width / 1.777) : viewport.height * 1.15
+  derive paintW = paintH * 1.777
+  derive paintLeft = wide ? (viewport.width - paintW) / 2 : max(viewport.width - paintW, min(0, viewport.width * 0.86 - paintW * 0.83))
   resource listening = loadListening() as shape Book[] else empty()
   resource found = searchBooks(asked) as shape Book[] else empty()
   // Under the field while typing: a few books for what has been typed so far.
@@ -109,6 +167,10 @@ component App
   derive createHint = pending(created) ? "Uploading…" : not account.signedIn ? "Sign in to make an audiobook." : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
+
+  // A drag's end can be followed by a click on the stack; it is spent a moment later either way.
+  task settling when moved and not dragging
+    after(250, clearMoved)
 
   // While an audiobook is being made, its page follows the progress.
   task poll mount
@@ -158,6 +220,51 @@ component App
     suggestOpen = false
   action back
     nav = back(nav)
+  action next
+    if n > 0
+      cur = (cur + 1) % n
+  action prev
+    if n > 0
+      cur = (cur + n - 1) % n
+  // On the lander, ← and → turn the stack.
+  action keyed(key: string)
+    if top(nav).name == "lander"
+      if key == "ArrowRight"
+        next()
+      else if key == "ArrowLeft"
+        prev()
+  // A tap throws the top book aside; one that ends a drag does not.
+  action tapBook
+    if moved
+      moved = false
+    else
+      next()
+  action dragBook(dx: number, dy: number)
+    dragging = true
+    dragX = dx
+    dragY = dy
+    moved = moved or max(mag(dx), mag(dy)) > 6
+  // A throw to the left turns to the next book, to the right back to the last; a short one settles.
+  action dropBook(vx: number, vy: number)
+    if n > 0 and (dragX < -70 or vx < -600)
+      cur = (cur + 1) % n
+    else if n > 0 and (dragX > 70 or vx > 600)
+      cur = (cur + n - 1) % n
+    dragging = false
+    dragX = 0
+    dragY = 0
+  action clearMoved
+    moved = false
+  action scrolled(x: number, y: number)
+    scrollY = y
+  action enter
+    nav = push(nav, path("home"))
+  // A book on the stack opens the library searching for it.
+  action seek(g: Great)
+    query = g.title
+    asked = `${g.title} ${g.author}`
+    suggestOpen = false
+    nav = push(nav, path("home"))
   action follow(url: string)
     nav = go(nav, url)
   action openCreate
@@ -198,8 +305,79 @@ component App
       track = track + 1
 
   view
-    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow testId="app" width="100%" height="100%"
+    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed testId="app" width="100%" height="100%"
       for e in stack(nav) key=e.id
+        if e.name == "lander"
+          column navigationKey=`${e.id}` position="absolute" inset=0 overflow="hidden" background-color="#121419" testId="lander"
+            background-image="radial-gradient(ellipse closest-side at 50% 45%, rgba(120,128,150,0.16) 0%, rgba(120,128,150,0) 100%)"
+            // The painting, behind everything, fading out and drifting up as the page scrolls.
+            view position="absolute" inset=0 pointer-events="none" opacity=(1 - fade) overflow="hidden"
+              view position="absolute" inset=0 animation=(still ? "none" : "settle 18s cubic-bezier(.2,.6,.2,1) both")
+                image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH
+                  translate=`0px ${round(-scrollY * 0.25)}px`
+              view position="absolute" inset=0
+                background-image=(wide ? "linear-gradient(100deg, rgba(240,240,244,0.55) 0%, rgba(240,240,244,0.18) 38%, rgba(240,240,244,0) 60%)" : "linear-gradient(180deg, rgba(240,240,244,0.5) 0%, rgba(240,240,244,0.15) 45%, rgba(240,240,244,0) 70%)")
+              // Fog drifting along the fold, out of which the books rise.
+              view position="absolute" left="-15%" right="-15%" bottom=0 height="45%" opacity=0.7
+                animation=(still ? "none" : "drift 26s ease-in-out infinite")
+                view position="absolute" left="0%" bottom="-35%" width="55%" height="90%"
+                  background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.9) 0%, rgba(250,250,252,0) 100%)"
+                view position="absolute" left="40%" bottom="-45%" width="60%" height="95%"
+                  background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.85) 0%, rgba(250,250,252,0) 100%)"
+            scroll id="lander-scroll" position="absolute" top=0 left=0 width="100%" height="100%" scroll=scrolled
+              overflow-x="hidden" overflow-y="auto" scrollbar-width="none"
+              // The hero, over the painting: the line, and the stack of books to throw through.
+              column height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
+                gap=(wide ? 44 : 32) padding=(wide ? "72px 24px 40px" : "72px 20px 32px")
+                text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 text-align="center"
+                  font-size=(wide ? min(76, round(viewport.width * 0.052)) : 40) line-height=1.05 letter-spacing="-0.02em" color="#1b1f2b"
+                  opacity=max(0, 1 - fade * 1.5) animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
+                // Tap the top book to throw it aside, or swipe it away in any direction.
+                button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
+                  width=coverW height=coverH flex-shrink=0 touch-action="pan-y" pan=dragBook panrelease=dropBook cursor="grab"
+                  animation=(still ? "none" : "arrive 1.4s 0.35s cubic-bezier(.2,.7,.2,1) both")
+                  for g, i in greats key=g.id
+                    Volume(book=g, depth=depthOf(i, cur, n), n=n, i=i, w=coverW, h=coverH,
+                      dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
+                // The focused book's title, lifted off the painting by a soft pale halo, and the one thing to do with it.
+                for g in focused key=g.id
+                  column align-items="center" gap=14 padding-top=(wide ? 20 : 16) position="relative" opacity=max(0, 1 - fade * 1.5)
+                    animation=(still ? "none" : "inkIn 500ms cubic-bezier(.2,.7,.2,1) both")
+                    view position="absolute" left="-30%" right="-30%" top="-10%" bottom="-25%" pointer-events="none"
+                      background-image="radial-gradient(ellipse closest-side, rgba(242,242,246,0.7) 0%, rgba(242,242,246,0.35) 55%, rgba(242,242,246,0) 100%)"
+                    column align-items="center" gap=5 position="relative"
+                      text g.title font-family="Jost" font-weight=400 font-size=18 color="#14171f" text-align="center" line-clamp=1 testId="great-title"
+                      text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
+                    button press=seek(g) appearance="none" testId="seek" position="relative" padding="4px 0" cursor="pointer"
+                      text "Open in Exalt  →" font-family="Jost" font-weight=400 font-size=14 color="#14171f"
+                        border-bottom="1px solid rgba(20,23,31,0.35)" padding-bottom=2
+              // Below the fold, in the dark: what Exalt is, and signing up.
+              column min-height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
+                padding=(wide ? "120px 24px" : "96px 24px") gap=44
+                column max-width=640 align-items="center" gap=22 opacity=fade
+                  text "Exalt turns any book into audio in a voice you choose."
+                    font-family="Jost" font-weight=300 font-size=(wide ? 32 : 24) line-height=1.3 color="#eeebe4" text-align="center" testId="about"
+                  text "Generate, listen, and share for free."
+                    font-family="Jost" font-weight=400 font-size=(wide ? 17 : 15) line-height=1.6 color="#9a978f" text-align="center" max-width=520
+                column width="100%" max-width=300 align-items="stretch" gap=12 opacity=fade
+                  if account.signedIn
+                    text `Signed in as ${account.name}` font-family="Jost" font-size=15 color="#9a978f" text-align="center" testId="lander-account"
+                    link href=path("home") testId="lander-library" padding="13px 26px" border-radius=999 background-color="#eeebe4" display="flex" justify-content="center"
+                      text "Open the library" font-family="Jost" font-weight=500 font-size=15 color="#1b1f2b"
+                  else
+                    if identities.providers.apple.active
+                      exact-sign-in-button provider="apple" press=appleSignIn testId="lander-apple" width="100%" height=46
+                    if identities.providers.google.active
+                      exact-sign-in-button provider="google" press=googleSignIn testId="lander-google" width="100%" height=46
+                    if signInError != ""
+                      text signInError color="#e8837b" font-family="Jost" font-size=14 text-align="center" testId="lander-sign-in-error"
+                    link href=path("home") testId="lander-library" padding="10px 0" display="flex" justify-content="center"
+                      text "Or just listen  →" font-family="Jost" font-size=15 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
+            header display="flex" align-items="center" padding=(wide ? "28px 7vw" : "18px 24px") position="absolute" top=0 left=0 right=0 z-index=5
+              background-color="transparent" border-bottom="none" pointer-events="none"
+              text "EXALT" flex=1 font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
+              link href=path("home") testId="enter" padding="6px 0" pointer-events="auto"
+                text "Library" font-family="Jost" font-weight=400 font-size=15 letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
         if e.name == "home"
           column navigationKey=`${e.id}` navigationScroll="home-list" position="absolute" inset=0
             header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px" position="relative" z-index=2
@@ -408,6 +586,41 @@ component VersionRow
           text statusText(version) font="-exact-footnote" color=(version.status == "failed" ? "-exact-system-red" : "-exact-secondary-label") testId=`status-${version.id}`
         if version.status != "failed"
           progress aria-label="Making"
+
+keyframes settle
+  from scale=1.08
+keyframes arrive
+  from opacity=0 translate="0px 40px"
+keyframes inkIn
+  from opacity=0 translate="0px 10px"
+keyframes drift
+  50% translate="6% -2%"
+
+// A book lying face up in the stack: its cover, its page edges under it, a sheen of light
+// on the one in focus and shade on the ones below.
+component Volume
+  props
+    book: Great
+    depth: number
+    n: number
+    i: number
+    w: number
+    h: number
+    dx: number
+    dy: number
+    dragging: bool
+  view
+    view position="absolute" left=0 top=0 width=w height=h z-index=volZ(depth, n) testId=`great-${book.id}`
+      translate=`${volX(depth, n, i, w) + dx}px ${volY(depth, n, h) + dy}px` rotate=`${volRot(depth, n, i) + dx * 0.05}deg`
+      scale=(dragging and depth == 0 ? 1.03 : 1 - min(depth, 5) * 0.012) opacity=volOpacity(depth, n)
+      transition=(dragging and depth == 0 ? "scale 200ms ease" : "translate -exact-spring(150, 20, 1), rotate -exact-spring(150, 20, 1), scale -exact-spring(150, 20, 1), opacity 650ms ease")
+      border-radius=3 background-color="#2a2d36"
+      box-shadow="1px 1px 0 #f3eee2, 2px 2px 0 #ddd4bf, 3px 3px 0 #f3eee2, 4px 4px 0 #d6ccb5, 5px 5px 0 #efe8d8, 6px 6px 0 #c4b99f, 0 30px 50px -12px rgba(8,10,18,0.6)"
+      image book.cover alt=(depth == 0 ? `${book.title}, ${book.author}` : "") width="100%" height="100%" object-fit="cover" border-radius=3
+      view position="absolute" inset=0 border-radius=3 pointer-events="none"
+        background-image="linear-gradient(90deg, rgba(0,0,0,0.30) 0%, rgba(255,255,255,0.12) 2.2%, rgba(0,0,0,0.06) 4%, rgba(0,0,0,0) 7%), linear-gradient(118deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0) 45%)"
+      view position="absolute" inset=0 border-radius=3 pointer-events="none" background-color="#0b0d14"
+        opacity=(min(depth, 5) * 0.1) transition="opacity 420ms ease"
 
 // A cover, or a book symbol on a plain tile where Open Library has none.
 component Cover
