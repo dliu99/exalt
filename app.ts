@@ -11,7 +11,9 @@ const APPLE_SERVICES_ID: string = import.meta.env.APPLE_SERVICES_ID ?? 'app.exal
 const GOOGLE_WEB_CLIENT_ID: string = import.meta.env.GOOGLE_WEB_CLIENT_ID ?? 'exalt-web.apps.googleusercontent.com';
 const GOOGLE_IOS_CLIENT_ID: string = import.meta.env.GOOGLE_IOS_CLIENT_ID ?? 'exalt-ios.apps.googleusercontent.com';
 const SESSION = 'exalt.session';
-export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`,
+const PLACES = 'exalt.places';
+const VOICE = 'exalt.voice';
+export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
   `auth.apple ${APPLE_SERVICES_ID}`, `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`].join('\n');
 
 type Reply = Result<'createAudiobook'>;
@@ -122,6 +124,15 @@ const greats: [string, string, string, string][] = [
   ['9780140441185', 'Thus Spoke Zarathustra', 'Friedrich Nietzsche', '1883'],
 ];
 
+// Where the listener is in each audiobook, kept on this device (signed in or not), newest first.
+type Place = Result<'loadPlaces'>[number];
+const places = (store: Store): Place[] => {
+  try { return JSON.parse(store.get(PLACES) ?? '[]'); } catch { return []; }
+};
+// The voice the listener prefers, from Fish Audio's library; empty until they choose one.
+type Pref = Result<'loadVoicePref'>;
+const NO_VOICE: Pref = { id: '', title: '', cover: '' };
+
 const sources: Sources = {
   currentAccount: async (_a, store) => {
     const s = session(store);
@@ -131,6 +142,37 @@ const sources: Sources = {
   signInWith: ([name], store) => signInWith(store, name === 'google' ? 'google' : 'apple'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
+  loadPlaces: async (_a, store) => places(store),
+  // Keeps the place, unless the book is finished (the last chapter, within its last half minute).
+  savePlace: async ([gen, book, title, author, cover, track, tracks, time, duration], store) => {
+    const done = track >= tracks - 1 && duration > 0 && time >= duration - 30;
+    const rest = places(store).filter((p) => p.gen !== gen);
+    const kept = done ? rest : [{ gen, book, title, author, cover, track, tracks, time, duration }, ...rest];
+    store.set(PLACES, JSON.stringify(kept.slice(0, 24)));
+    return { ok: true, error: '' };
+  },
+  loadVoicePref: async (_a, store) => {
+    try { return { ...NO_VOICE, ...JSON.parse(store.get(VOICE) ?? '{}') }; } catch { return NO_VOICE; }
+  },
+  setVoicePref: async ([id, title, cover], store) => {
+    store.set(VOICE, JSON.stringify({ id, title, cover }));
+    return { ok: true, error: '' };
+  },
+  loadVoices: async ([q]) => ((await get(`/voices?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((v) => ({
+    id: String(v.id), title: String(v.title), description: String(v.description ?? ''), cover: String(v.cover ?? ''),
+    sample: String(v.sample ?? ''), languages: String(v.languages ?? ''), uses: Number(v.uses) || 0,
+  })),
+  // What the signed-in listener has made; nothing when signed out.
+  loadMine: async (_a, store) => {
+    if (!session(store)) return [];
+    const res = await fetch(`${API}/me/audiobooks`, { exactTimeout: 15000, headers: bearer(store) });
+    if (res.status === 401) return [];
+    const rows = (await res.json().catch(() => [])) as Record<string, unknown>[];
+    return rows.map((g) => ({
+      gen: String(g.id), book: String(g.book), title: String(g.title), author: String(g.author ?? ''), cover: String(g.cover ?? ''),
+      status: String(g.status), done: Number(g.done) || 0, total: Number(g.total) || 0, model: String(g.model), voice: String(g.voice ?? ''),
+    }));
+  },
   loadGreats: async () => greats.map(([isbn, title, author, era]) => ({ id: isbn, title, author, era, cover: `assets/covers/${isbn}.jpg` })),
   searchBooks: async ([q]) => (q.trim() === '' ? [] : ((await get(`/search?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]).map(book)),
   suggestBooks: async ([q]) => (q.trim().length < 2 ? [] : ((await get(`/search?q=${encodeURIComponent(q)}&limit=6`)) as Record<string, unknown>[]).map(book)),
@@ -143,26 +185,26 @@ const sources: Sources = {
       book: book(body.book),
       versions: body.versions.map((v) => ({
         id: String(v.id), by: String(v.by), model: String(v.model), voice: String(v.voice), status: String(v.status),
-        done: Number(v.done), total: Number(v.total), error: String(v.error), sample: abs(String(v.sample)),
+        done: Number(v.done), total: Number(v.total), error: String(v.error), sample: abs(String(v.sample)), voiceName: String(v.voiceName ?? ''),
       })),
     };
   },
   loadAudiobook: async ([id]) => {
-    if (!id) return { id: '', title: '', author: '', cover: '', by: '', model: '', tracks: [] };
+    if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', tracks: [] };
     const g = (await get(`/generations/${encodeURIComponent(id)}`)) as {
-      id: string; by: string; model: string; book: { title: string; author: string; cover: string };
+      id: string; by: string; model: string; book: { id: string; title: string; author: string; cover: string };
       tracks: { idx: number; title: string; src: string }[];
     };
     return {
-      id: String(g.id), title: g.book.title, author: g.book.author, cover: g.book.cover, by: g.by, model: g.model,
+      id: String(g.id), book: String(g.book.id), title: g.book.title, author: g.book.author, cover: g.book.cover, by: g.by, model: g.model,
       tracks: g.tracks.map((t) => ({ idx: t.idx, title: t.title, src: abs(t.src) })),
     };
   },
   // The picked file's bytes go up as the request body.
-  createAudiobook: async ([bookId, path, name, model, voice, by, rights], store, storage): Promise<Reply> => {
+  createAudiobook: async ([bookId, path, name, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
     try {
       const bytes = await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, model, voice, by, rights: rights ? '1' : '0' });
+      const query = new URLSearchParams({ name, model, voice, voiceName, by, rights: rights ? '1' : '0' });
       const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
         method: 'POST', body: bytes, exactTimeout: 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
