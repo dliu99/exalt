@@ -5,6 +5,7 @@
 /node_modules/
 /app.contract.d.ts
 /.exact/
+/.env
 /.env.local
 /data.db*
 /audio/

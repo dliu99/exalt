@@ -3,36 +3,44 @@
 // fixture and voices with silence, so nothing reaches the network.
 import { join as pathJoin, normalize } from 'node:path';
 import { API } from '../app.ts';
-import { ensureBook, search } from './catalog.ts';
+import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
 import { booksWithAudio, db, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
 import { AUDIO_DIR, enqueue } from './jobs.ts';
 import { parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
 
 const OFFLINE = process.argv.includes('--offline');
+consolidate();
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range', 'access-control-allow-methods': 'GET, POST', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
 const preflight = () => new Response(null, { status: 204, headers: CORS });
 const fail = (e: unknown, status = 502) => send({ error: String((e as Error).message ?? e) }, status);
 
-const bookJson = (b: BookRow, versions: number) => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, versions });
+const bookJson = (b: BookRow, versions: number) => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, description: b.description, versions });
 const versionJson = (g: GenerationRow) => {
   const first = tracksOf(g.id)[0];
   return { id: String(g.id), by: g.made_by, model: g.model, voice: g.voice, status: g.status, done: g.done, total: g.total, error: g.error,
     sample: first ? `/audio/${first.file}` : '' };
 };
 
-const { hostname, port } = new URL(API);
-Bun.serve({ hostname, port: Number(port), maxRequestBodySize: 200 * 1024 * 1024, routes: {
+// Locally the server listens where the app looks for it (API_BASE_URL); a host such as Render
+// says where instead (HOST, PORT), the public address being its proxy's.
+const listen = new URL(API);
+const hostname = process.env.HOST ?? listen.hostname, port = Number(process.env.PORT ?? listen.port);
+Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
   '/health': () => new Response('ok'),
 
   '/search': { OPTIONS: preflight, GET: async (req) => {
-    const q = new URL(req.url).searchParams.get('q')?.trim() ?? '';
+    const params = new URL(req.url).searchParams;
+    const q = params.get('q')?.trim() ?? '', provider = params.get('provider') ?? providerName;
+    // Suggestions under the field ask for a few (`limit`); the results page for all.
+    const limit = Math.min(25, Math.max(1, Number(params.get('limit')) || 25));
     if (!q) return send([]);
+    if (!isProvider(provider)) return send({ error: `No book provider called ${provider}.` }, 400);
     try {
-      const found = await search(q, OFFLINE);
+      const found = await search(q, OFFLINE, provider);
       const counts = readyCounts(found.map((b) => b.id));
-      return send(found.map((b) => bookJson(b, counts.get(b.id) ?? 0)));
+      return send(found.slice(0, limit).map((b) => bookJson(b, counts.get(b.id) ?? 0)));
     } catch (e) { return fail(e); }
   } },
 
@@ -47,7 +55,8 @@ Bun.serve({ hostname, port: Number(port), maxRequestBodySize: 200 * 1024 * 1024,
       const book = await ensureBook(req.params.id, OFFLINE);
       if (!book) return send({ error: 'No such book.' }, 404);
       const versions = generationsOf(book.id);
-      return send({ book: bookJson(book, versions.filter((v) => v.status === 'ready').length), versions: versions.map(versionJson) });
+      // Asked for under an edition's id, the page keeps that id; everything it shows is the book's.
+      return send({ book: { ...bookJson(book, versions.filter((v) => v.status === 'ready').length), id: req.params.id }, versions: versions.map(versionJson) });
     } catch (e) { return fail(e); }
   } },
 
@@ -89,4 +98,4 @@ Bun.serve({ hostname, port: Number(port), maxRequestBodySize: 200 * 1024 * 1024,
     return new Response(file.slice(start, end + 1), { status: 206, headers: { ...CORS, 'content-type': type, 'accept-ranges': 'bytes', 'content-range': `bytes ${start}-${end}/${size}` } });
   },
 } });
-console.log(`server/index.ts: ${API}${OFFLINE ? ' (offline)' : ''}`);
+console.log(`server/index.ts: http://${hostname}:${port}${OFFLINE ? ' (offline)' : ` (books from ${providerName})`}`);

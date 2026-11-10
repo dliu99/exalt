@@ -17,16 +17,17 @@ async function get(path: string): Promise<unknown> {
 
 const book = (b: Record<string, unknown>): Book => ({
   id: String(b.id), title: String(b.title), author: String(b.author ?? ''), year: Number(b.year) || 0,
-  cover: String(b.cover ?? ''), versions: Number(b.versions) || 0,
+  cover: String(b.cover ?? ''), description: String(b.description ?? ''), versions: Number(b.versions) || 0,
 });
 const abs = (path: string) => (path ? `${API}${path}` : '');
 
 const sources: Sources = {
   searchBooks: async ([q]) => (q.trim() === '' ? [] : ((await get(`/search?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]).map(book)),
+  suggestBooks: async ([q]) => (q.trim().length < 2 ? [] : ((await get(`/search?q=${encodeURIComponent(q)}&limit=6`)) as Record<string, unknown>[]).map(book)),
   loadListening: async () => ((await get('/listening')) as Record<string, unknown>[]).map(book),
   loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
   loadBook: async ([id]) => {
-    if (!id) return { book: { id: '', title: '', author: '', year: 0, cover: '', versions: 0 }, versions: [] };
+    if (!id) return { book: { id: '', title: '', author: '', year: 0, cover: '', description: '', versions: 0 }, versions: [] };
     const body = (await get(`/books/${encodeURIComponent(id)}`)) as { book: Record<string, unknown>; versions: Record<string, unknown>[] };
     return {
       book: book(body.book),

@@ -1,0 +1,27 @@
+# Render Blueprint for Exalt's server: New → Blueprint, pick this repository. Keys marked
+# `sync: false` are asked for once in the dashboard and kept as secrets there.
+services:
+  - type: web
+    name: exalt-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # A persistent disk needs a paid instance; the database and every audiobook live on it.
+    plan: starter
+    healthCheckPath: /health
+    # Jobs run inside the one process: one instance only.
+    numInstances: 1
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: DB
+        value: /var/data/data.db
+      - key: BOOK_PROVIDER
+        value: google
+      - key: HARDCOVER_API_KEY
+        sync: false
+      - key: GOOGLE_BOOKS_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false

@@ -1,4 +1,4 @@
-// Exalt: open audiobooks. Every book is one record (an Open Library work); anyone can upload
+// Exalt: open audiobooks. Every book is one record (a Google Books volume or Open Library work); anyone can upload
 // an EPUB, PDF or TXT of it and make an audiobook with the voice model they choose, which
 // then sits on that book's page for everyone. app.ts asks server/index.ts for all of it.
 use EmptyState from "exact:content"
@@ -15,6 +15,7 @@ shape Book
   author: string
   year: number
   cover: string
+  description: string
   versions: number
 
 shape Version
@@ -75,6 +76,11 @@ component App
   state track = 0
   resource listening = loadListening() as shape Book[] else empty()
   resource found = searchBooks(asked) as shape Book[] else empty()
+  // Under the field while typing: a few books for what has been typed so far.
+  state suggestFor = ""
+  state suggestOpen = false
+  state leaving = false
+  resource suggestions = suggestBooks(suggestFor) as shape Book[] else empty()
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
   resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
@@ -87,21 +93,42 @@ component App
   derive createError = match created { case some(r) => r.error, case none => "" }
   derive canCreate = filePath != "" and model != "" and rights and not pending(created)
   derive createHint = pending(created) ? "Uploading…" : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
+  derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
   // While an audiobook is being made, its page follows the progress.
   task poll mount
     every(3000, pull)
 
+  // Suggestions follow the typing: a short pause asks for a few books (the server keeps each
+  // search, so typing back costs nothing). Enter asks for every result.
+  task suggesting when query.trim() != suggestFor key=query
+    after(200, takeSuggest)
+  // Leaving the field closes them, a moment later, so a tap on one still lands.
+  task closing when leaving
+    after(200, closeSuggest)
+
   action pull
     if working
       refresh detail
   action search(v: string)
     query = v
+    suggestOpen = true
     if v.trim() == ""
       asked = ""
   action ask
     asked = query.trim()
+    suggestOpen = false
+  action takeSuggest
+    suggestFor = query.trim()
+  action fieldFocus
+    leaving = false
+    suggestOpen = true
+  action fieldBlur
+    leaving = true
+  action closeSuggest
+    leaving = false
+    suggestOpen = false
   action back
     nav = back(nav)
   action follow(url: string)
@@ -148,10 +175,16 @@ component App
       for e in stack(nav) key=e.id
         if e.name == "home"
           column navigationKey=`${e.id}` navigationScroll="home-list" position="absolute" inset=0
-            header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px"
+            header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px" position="relative" z-index=2
               text "Exalt" role="heading" aria-level=1 flex=1
-              input type="search" value=query input=search submit=ask placeholder="Title or author"
-                aria-label="Search Books" testId="search" width="100%"
+              column position="relative" width="100%"
+                input type="search" value=query input=search submit=ask focus=fieldFocus blur=fieldBlur placeholder="Title or author"
+                  aria-label="Search Books" testId="search" width="100%"
+                if showSuggestions
+                  column role="listbox" aria-label="Suggestions" testId="suggestions" position="absolute" top="100%" left=0 right=0 margin-top=6 z-index=10
+                    background-color="-exact-secondary-grouped-background" border-radius=12 overflow="hidden" box-shadow="0 8px 24px rgba(0, 0, 0, 0.25)"
+                    for b in suggestions.slice(0, 6) key=b.id
+                      SuggestionRow(book=b)
             if asked != ""
               if searchError != ""
                 EmptyState(symbol="symbol:alert", title="Can’t Search", message=searchError)
@@ -193,6 +226,12 @@ component App
                       text byline(detail.book) color="-exact-secondary-label" text-align="center"
                     link href=goodreads(detail.book) testId="goodreads"
                       text "Reviews on Goodreads"
+                if detail.book.description != ""
+                  section
+                    header
+                      text "About"
+                    row padding-top=8 padding-bottom=8
+                      text detail.book.description white-space="pre-line" flex=1 min-width=0 testId="book-description"
                 for v in ready.slice(0, 1) key=v.id
                   section
                     header
@@ -281,6 +320,17 @@ component App
                       text t.title flex=1 min-width=0 color=(t.idx == track ? "AccentColor" : "-exact-label")
                       if t.idx == track
                         image "symbol:speaker"
+
+component SuggestionRow
+  props
+    book: Book
+  view
+    link href=path("book", book.id) role="option" testId=`suggest-${book.id}` padding="8px 12px"
+      row gap=10 align-items="center" flex=1 min-width=0
+        Cover(src=book.cover, size=36)
+        column flex=1 min-width=0 gap=1
+          text book.title line-clamp=1
+          text byline(book) font="-exact-footnote" color="-exact-secondary-label" line-clamp=1
 
 component BookRow
   props
