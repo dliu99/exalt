@@ -107,15 +107,13 @@ test "enter shows every result and closes the suggestions"
   expect tree missing "suggestions"
   expect tree has "book-OL2W"
 
-test "explore starts with the canon, and a book of it searches for it"
+test "explore is only the search field until something is asked"
   clock data
   tap "enter"
   tap "nav-explore"
   clock data
-  expect tree has "canon-9780141442433"
-  tap "canon-9780141442433"
-  clock data
-  expect state asked == "The Republic Plato"
+  expect tree has "search"
+  expect tree missing "canon-9780141442433"
 
 test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
