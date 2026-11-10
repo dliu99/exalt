@@ -170,9 +170,16 @@ so older `.mp3` and `.wav` objects still play.
 
 SQLite records each track's storage backend, so existing local tracks keep playing after S3
 is enabled. Existing files are not automatically migrated, and changing buckets/endpoints
-requires copying their objects with the same keys. SQLite and temporary scratch still need
-a persistent disk when using S3. Bucket provisioning, backups, retention rules and storage
-billing remain deployment configuration; the code does not create cloud resources.
+requires copying their objects with the same keys. Bucket provisioning, backups, retention
+rules and storage billing remain deployment configuration; the code does not create cloud
+resources.
+
+With a bucket configured, the container also keeps SQLite in it: `deploy/start.sh` runs the
+server under [Litestream](https://litestream.io) (`deploy/litestream.yml`), which restores the
+database from `db/` in the bucket when the container starts without one and copies each change
+there about once a second. A host without a lasting disk (Render's free instance) then loses at
+most the last second of writes on a restart or deploy. Run one container per bucket: two would
+write over each other's copy. Without a bucket, the database lives only on the container's disk.
 
 For capacity planning, a 10-hour MP3 at 64 kbit/s is about **288 MB**; at 128 kbit/s it is
 about **576 MB**. Actual provider output determines the size. The default 2 GiB per-generation

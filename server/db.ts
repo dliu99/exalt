@@ -4,6 +4,8 @@
 import { Database } from 'bun:sqlite';
 
 export const db = new Database(process.env.DB ?? 'data.db');
+// Litestream (deploy/start.sh) briefly locks the database to checkpoint it; wait rather than fail.
+db.run('PRAGMA busy_timeout = 5000');
 db.run('PRAGMA journal_mode = WAL');
 db.run(`CREATE TABLE IF NOT EXISTS books (
   id TEXT PRIMARY KEY,

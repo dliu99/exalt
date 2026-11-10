@@ -1,5 +1,7 @@
 *
 !app.ts
 !server/
+!deploy/litestream.yml
+!deploy/start.sh
 server/node_modules
 server/*.test.ts

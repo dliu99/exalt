@@ -1,0 +1,16 @@
+# Litestream copies the SQLite database to the audio bucket (under db/) as it changes, and
+# deploy/start.sh restores it from there before the server starts. A host whose disk does not
+# last (Render's free instance) then keeps its data across restarts and deploys. The same
+# AUDIO_S3_* settings the server uses for audio name the bucket and its keys.
+dbs:
+  - path: ${DB}
+    replicas:
+      - type: s3
+        bucket: ${AUDIO_S3_BUCKET}
+        path: db
+        endpoint: ${AUDIO_S3_ENDPOINT}
+        region: ${AUDIO_S3_REGION}
+        access-key-id: ${AUDIO_S3_ACCESS_KEY_ID}
+        secret-access-key: ${AUDIO_S3_SECRET_ACCESS_KEY}
+        force-path-style: true
+        sync-interval: 1s
