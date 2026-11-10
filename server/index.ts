@@ -65,6 +65,8 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
       return back(await accounts.back('POST', Object.fromEntries([...(form?.entries() ?? [])].map(([k, v]) => [k, String(v)]))));
     },
   },
+  // Whether the app asks for an account before anything else: not offline, where no provider can answer.
+  '/door': { OPTIONS: preflight, GET: () => send({ required: !OFFLINE }) },
   '/me': { OPTIONS: preflight, GET: (req) => {
     const me = accounts.user(req);
     return me ? send({ name: me.name, email: me.email }) : send({ error: 'Not signed in.' }, 401);
