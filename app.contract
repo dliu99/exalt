@@ -205,6 +205,8 @@ component App
   state suggestFor = ""
   state suggestOpen = false
   state leaving = false
+  state fieldOn = false
+  state voiceOn = false
   resource suggestions = suggestBooks(suggestFor) as shape Book[] else empty()
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
@@ -246,6 +248,10 @@ component App
   derive canCreate = account.signedIn and (filePath != "" or sourceId != "") and model != "" and rights and not pending(created)
   derive createHint = pending(created) ? (sourceId != "" ? "Downloading book and preparing audiobook…" : "Uploading…") : filePath == "" and sourceId == "" ? "Choose a book file or upload your own." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
+  // The field shows it is working from the first keystroke's pause to the answer.
+  derive searching = asked != "" and pending(found)
+  derive suggesting = suggestOpen and query.trim().length >= 2 and query.trim() != asked and (query.trim() != suggestFor or pending(suggestions))
+  derive voiceBusy = voiceQuery.trim() != voiceAsked or pending(voiceList)
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
   // While playing, the place is kept every so often (and at every pause and chapter's end).
@@ -296,10 +302,16 @@ component App
     suggestOpen = false
   action takeSuggest
     suggestFor = query.trim()
+  action clearSearch
+    query = ""
+    asked = ""
+    suggestOpen = false
   action fieldFocus
+    fieldOn = true
     leaving = false
     suggestOpen = true
   action fieldBlur
+    fieldOn = false
     leaving = true
   action closeSuggest
     leaving = false
@@ -463,6 +475,13 @@ component App
     voiceQuery = v
   action takeVoiceQuery
     voiceAsked = voiceQuery.trim()
+  action clearVoiceQuery
+    voiceQuery = ""
+    voiceAsked = ""
+  action voiceFocus
+    voiceOn = true
+  action voiceBlur
+    voiceOn = false
   action audition(src: string)
     auditioning = auditioning == src ? "" : src
   action auditionEnded
@@ -613,12 +632,8 @@ component App
                 column gap=18 position="relative" z-index=2
                   text "Explore" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
                   column position="relative" width="100%" max-width=640
-                    input type="search" value=query input=search submit=ask focus=fieldFocus blur=fieldBlur placeholder="A title or an author"
-                      aria-label="Search Books" testId="search" width="100%" box-sizing="border-box" appearance="none"
-                      font-family="Jost" font-weight=300 font-size=(wide ? 24 : 20) color="#14171f" background-color="transparent"
-                      border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="10px 0" outline="none"
-                      ::placeholder
-                        color="#8a8f9c"
+                    SearchField(value=query, hint="Search by title or author", label="Search Books", id="search", focused=fieldOn, busy=(searching or suggesting), still=still, big=wide,
+                      edit=search, enter=ask, focus=fieldFocus, blur=fieldBlur, clear=clearSearch)
                     if showSuggestions
                       column role="listbox" aria-label="Suggestions" testId="suggestions" position="absolute" top="100%" left=0 right=0 margin-top=8 z-index=10
                         background-color="#f7f8fa" border-radius=10 overflow="hidden" box-shadow="0 18px 40px -12px rgba(20,24,36,0.35)" padding="6px 0"
@@ -628,14 +643,18 @@ component App
                   if searchError != ""
                     text searchError font-family="Jost" font-size=16 color="#b2463c" testId="search-error"
                   else if pending(found) and found.length == 0
-                    row justify-content="center" padding=40
-                      progress aria-label="Searching" testId="searching"
+                    column role="status" aria-label="Searching" testId="searching"
+                      for n in [0, 1, 2, 3, 4] key=n
+                        SkeletonRow(i=n, still=still, face=false)
                   else if found.length == 0
                     text "No books found. Try a different title or author." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-results"
+                      animation=(still ? "none" : "inkIn 420ms cubic-bezier(.2,.7,.2,1) both")
                   else
-                    column
-                      for b in found key=b.id
-                        ResultRow(book=b)
+                    // A new search dims the last one's books until its own arrive.
+                    column opacity=(pending(found) ? 0.4 : 1) transition="opacity 220ms ease"
+                      for b, i in found key=b.id
+                        view animation=(still ? "none" : `inkIn 420ms ${min(i, 10) * 45}ms cubic-bezier(.2,.7,.2,1) both`)
+                          ResultRow(book=b)
             TopBar(active="explore", wide=wide)
         // Voices: a recommended set to start, and Fish Audio's whole community library by search.
         if e.name == "voices"
@@ -644,22 +663,23 @@ component App
               column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "88px 20px 72px") gap=32
                 column gap=12
                   text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
-                input type="search" value=voiceQuery input=editVoiceQuery placeholder="Search for more voices…" aria-label="Search Voices" testId="voice-search"
-                  width="100%" max-width=480 box-sizing="border-box" appearance="none" font-family="Jost" font-weight=300 font-size=20 color="#14171f"
-                  background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="8px 0" outline="none"
-                  ::placeholder
-                    color="#8a8f9c"
+                view width="100%" max-width=560
+                  SearchField(value=voiceQuery, hint="Search for more voices", label="Search Voices", id="voice-search", focused=voiceOn, busy=voiceBusy, still=still, big=false,
+                    edit=editVoiceQuery, enter=takeVoiceQuery, focus=voiceFocus, blur=voiceBlur, clear=clearVoiceQuery)
                 if pending(voiceList) and voiceList.length == 0
-                  row justify-content="center" padding=40
-                    progress aria-label="Loading voices"
+                  column role="status" aria-label="Loading voices" testId="voices-loading"
+                    for n in [0, 1, 2, 3, 4] key=n
+                      SkeletonRow(i=n, still=still, face=true)
                 else if voiceList.length == 0
                   text "No voices found." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-voices"
+                    animation=(still ? "none" : "inkIn 420ms cubic-bezier(.2,.7,.2,1) both")
                 else
                   column gap=8
                     SectionTitle(label=(voiceAsked == "" ? "Recommended" : "Community"))
-                    column
-                      for v in voiceList key=v.id
-                        VoiceRow(voice=v, chosen=(v.id == voicePref.id), playing=(v.sample != "" and v.sample == auditioning), audition=audition, choose=chooseVoice)
+                    column opacity=(voiceBusy ? 0.4 : 1) transition="opacity 220ms ease"
+                      for v, i in voiceList key=v.id
+                        view animation=(still ? "none" : `inkIn 420ms ${min(i, 10) * 45}ms cubic-bezier(.2,.7,.2,1) both`)
+                          VoiceRow(voice=v, chosen=(v.id == voicePref.id), playing=(v.sample != "" and v.sample == auditioning), audition=audition, choose=chooseVoice)
                 if auditioning != ""
                   audio src=auditioning autoplay=true ended=auditionEnded testId="audition"
             TopBar(active="home", wide=wide)
@@ -1017,6 +1037,76 @@ component VoiceRow
           text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
             border-bottom=(chosen ? "1px solid transparent" : "1px solid rgba(20,23,31,0.3)") padding-bottom=2
 
+// The search field: a lit box with a glass, that lifts on focus and shows its own working —
+// a turning ring where the clear button sits, and a line sweeping along its foot.
+component SearchField
+  props
+    value: string
+    hint: string
+    label: string
+    id: string
+    focused: bool
+    busy: bool
+    still: bool
+    big: bool
+    edit: action
+    enter: action
+    focus: action
+    blur: action
+    clear: action
+  view
+    row position="relative" align-items="center" gap=12 width="100%" box-sizing="border-box" height=(big ? 60 : 54) padding="0 16px 0 18px"
+      border-radius=16 overflow="hidden" background-color=(focused ? "#ffffff" : "#f7f8fa")
+      border=(focused ? "1px solid rgba(20,23,31,0.55)" : "1px solid rgba(20,23,31,0.14)")
+      box-shadow=(focused ? "0 16px 36px -16px rgba(20,24,36,0.45)" : "0 6px 16px -12px rgba(20,24,36,0.35)")
+      transition="background-color 200ms ease, border-color 200ms ease, box-shadow 260ms ease"
+      image "symbol:search" color=(focused ? "#14171f" : "#6b7080") width=20 height=20 flex-shrink=0
+      // A text field with a search keyboard: the box draws its own glass and clear button.
+      input type="text" inputmode="search" enterkeyhint="search" autocomplete="off" value=value input=edit submit=enter focus=focus blur=blur placeholder=hint
+        aria-label=label testId=id flex=1 min-width=0 height="100%" box-sizing="border-box" appearance="none"
+        font-family="Jost" font-weight=300 font-size=(big ? 22 : 19) color="#14171f" background-color="transparent"
+        border="none" border-radius=0 padding=0 outline="none"
+        ::placeholder
+          color="#8a8f9c"
+      if busy
+        if still
+          text "Searching…" font-family="Jost" font-size=13 color="#6b7080" flex-shrink=0 testId=`${id}-busy`
+        else
+          view width=18 height=18 box-sizing="border-box" border-radius=999 flex-shrink=0 testId=`${id}-busy`
+            border="2px solid rgba(20,23,31,0.14)" border-top-color="#14171f" animation="spin 700ms linear infinite"
+      else if value != ""
+        button press=clear appearance="none" aria-label="Clear" testId=`${id}-clear` width=28 height=28 border-radius=999 flex-shrink=0
+          display="flex" align-items="center" justify-content="center" background-color="rgba(20,23,31,0.07)" cursor="pointer"
+          animation=(still ? "none" : "popIn 180ms ease both")
+          image "symbol:close" color="#4a4f5c" width=10 height=10
+      if busy and not still
+        view position="absolute" left=0 bottom=0 width="35%" height=2 pointer-events="none"
+          background-image="linear-gradient(90deg, rgba(20,23,31,0) 0%, rgba(20,23,31,0.75) 50%, rgba(20,23,31,0) 100%)"
+          animation="sweep 1.1s ease-in-out infinite"
+
+// A row still to come: the shape of a book or a voice, breathing, each a beat after the last.
+component SkeletonRow
+  props
+    i: number
+    still: bool
+    face: bool
+  view
+    row gap=18 align-items="center" padding=(face ? "16px 0" : "14px 0") border-bottom="1px solid rgba(20,23,31,0.08)"
+      animation=(still ? "none" : `breathe 1.3s ${i * 130}ms ease-in-out infinite`)
+      view width=(face ? 52 : 48) height=(face ? 52 : 72) border-radius=(face ? 999 : 3) background-color="#d5d9e1" flex-shrink=0
+      column flex=1 min-width=0 gap=9
+        view height=14 width=`${62 - i * 8}%` border-radius=4 background-color="#d5d9e1"
+        view height=10 width=`${40 - i * 4}%` border-radius=4 background-color="#dfe2e8"
+
+keyframes spin
+  to rotate="360deg"
+keyframes sweep
+  from translate="-100% 0px"
+  to translate="290% 0px"
+keyframes breathe
+  50% opacity=0.4
+keyframes popIn
+  from opacity=0 scale=0.6
 keyframes arrive
   from opacity=0 translate="0px 40px"
 keyframes inkIn
