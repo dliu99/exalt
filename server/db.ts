@@ -29,6 +29,9 @@ db.run(`CREATE TABLE IF NOT EXISTS generations (
   error TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 )`);
+// The voice's name as the reader chose it (a Fish Audio voice is stored by its id).
+if (!(db.query('PRAGMA table_info(generations)').all() as { name: string }[]).some((c) => c.name === 'voice_name'))
+  db.run("ALTER TABLE generations ADD COLUMN voice_name TEXT NOT NULL DEFAULT ''");
 db.run(`CREATE TABLE IF NOT EXISTS tracks (
   generation_id INTEGER NOT NULL REFERENCES generations(id),
   idx INTEGER NOT NULL,
@@ -47,7 +50,7 @@ db.run('CREATE INDEX IF NOT EXISTS links_book ON links(book_id)');
 
 export type BookRow = { id: string; title: string; author: string; year: number; cover: string; description: string };
 export type GenerationRow = {
-  id: number; book_id: string; made_by: string; model: string; voice: string; source_name: string;
+  id: number; book_id: string; made_by: string; model: string; voice: string; voice_name?: string; source_name: string;
   status: string; done: number; total: number; error: string; created_at: number;
 };
 export type TrackRow = { generation_id: number; idx: number; title: string; file: string };
@@ -111,3 +114,7 @@ export const allBooksByAudio = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM
 // "anti-oedipus" and "Anti–Oedipus" normalize alike).
 export const savedBooks = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM generations g WHERE g.book_id = b.id AND g.status = 'ready') AS versions
   FROM books b`).all() as (BookRow & { versions: number })[];
+
+// What one person has made, newest first, each with its book.
+export const generationsBy = (userId: number) => db.query(`SELECT g.*, b.title, b.author, b.cover
+  FROM generations g JOIN books b ON b.id = g.book_id WHERE g.user_id = ? ORDER BY g.id DESC`).all(userId) as (GenerationRow & { title: string; author: string; cover: string })[];

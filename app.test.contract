@@ -22,7 +22,9 @@ test "below the fold, the lander says what Exalt is and opens the library"
   expect tree has "lander-google"
   tap "lander-library"
   clock data
-  expect tree has "search"
+  expect tree has "home"
+  expect tree has "no-places"
+  expect tree has "mine-signed-out"
 
 test "an empty library says how to start"
   clock data
@@ -33,6 +35,7 @@ test "an empty library says how to start"
 
 test "search finds a book and opens its page"
   tap "enter"
+  tap "nav-explore"
   type "search" "rivers"
   type "search" key "Enter"
   clock data
@@ -46,6 +49,7 @@ test "search finds a book and opens its page"
 
 test "making an audiobook waits for a file and consent"
   tap "enter"
+  tap "nav-explore"
   type "search" "harbour"
   type "search" key "Enter"
   clock data
@@ -59,6 +63,7 @@ test "making an audiobook waits for a file and consent"
 
 test "making an audiobook asks for an account, with Apple's and Google's buttons"
   tap "enter"
+  tap "nav-explore"
   type "search" "harbour"
   type "search" key "Enter"
   clock data
@@ -74,6 +79,7 @@ test "making an audiobook asks for an account, with Apple's and Google's buttons
 
 test "typing suggests books under the field, and one opens its page"
   tap "enter"
+  tap "nav-explore"
   type "search" "r"
   clock +300
   clock data
@@ -91,6 +97,7 @@ test "typing suggests books under the field, and one opens its page"
 
 test "enter shows every result and closes the suggestions"
   tap "enter"
+  tap "nav-explore"
   type "search" "rivers"
   clock +300
   clock data
@@ -99,3 +106,28 @@ test "enter shows every result and closes the suggestions"
   clock data
   expect tree missing "suggestions"
   expect tree has "book-OL2W"
+
+test "explore starts with the canon, and a book of it searches for it"
+  clock data
+  tap "enter"
+  tap "nav-explore"
+  clock data
+  expect tree has "canon-9780141442433"
+  tap "canon-9780141442433"
+  clock data
+  expect state asked == "The Republic Plato"
+
+test "voices lists Fish Audio's, and choosing one makes it yours"
+  clock data
+  tap "enter"
+  clock data
+  expect text "voice-name" == "No voice chosen yet"
+  tap "change-voice"
+  clock data
+  expect tree has "voice-v-reader"
+  tap "use-v-reader"
+  clock data
+  expect text "use-v-reader" == "✓ Yours"
+  tap "nav-home"
+  clock data
+  expect text "voice-name" == "The Reader"

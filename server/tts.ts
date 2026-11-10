@@ -1,5 +1,6 @@
 // Text to speech through an OpenAI-compatible `/audio/speech` endpoint, OpenRouter by default.
-// TTS_BASE_URL points it elsewhere (a self-hosted model, Fish Audio's own API behind a shim).
+// TTS_BASE_URL points it elsewhere (a self-hosted model). Fish Audio's models take a voice from
+// Fish's library by its id (fish.ts lists them).
 // The key stays on the server: OPENROUTER_API_KEY, never in the app.
 export type Model = { id: string; name: string; voices: string[] };
 export type Voice = { audio: Uint8Array; ext: 'mp3' | 'pcm' | 'wav'; rate?: number };
