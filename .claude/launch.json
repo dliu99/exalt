@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["--env-file=../../../.env", "server/index.ts"],
+      "env": { "API_BASE_URL": "http://127.0.0.1:9123" },
+      "port": 9123
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["exact.mjs", "web", "--port", "3000"],
+      "env": { "EXACT2": "/Users/devin/projects/exact", "API_BASE_URL": "http://127.0.0.1:9123" },
+      "port": 3000
+    }
+  ]
+}

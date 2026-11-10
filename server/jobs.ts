@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join as pathJoin } from 'node:path';
 import { db } from './db.ts';
 import { type Chapter, chunks } from './parse.ts';
-import { join, speak } from './tts.ts';
+import { join, speak, wav } from './tts.ts';
 
 export const AUDIO_DIR = process.env.AUDIO_DIR ?? pathJoin(dirname(process.env.DB ?? 'data.db'), 'audio');
 mkdirSync(AUDIO_DIR, { recursive: true });
@@ -39,15 +39,18 @@ async function run({ id, model, voice, chapters }: Job) {
   mkdirSync(pathJoin(AUDIO_DIR, String(id)), { recursive: true });
   for (const [idx, chapter] of chapters.entries()) {
     const voiced = [];
-    let ext = 'mp3';
+    let ext = 'mp3', rate = 44100;
     // The chapter's title is read first, as a narrator would.
     for (const text of chunks(`${chapter.title}. ${chapter.text}`)) {
       const v = await speak(model, voice, text);
       voiced.push(v.audio);
       ext = v.ext;
+      rate = v.rate ?? rate;
     }
     // A WAV can't be joined by bytes; the test voice's chunks are all the same silence.
-    const audio = ext === 'wav' ? voiced[0] : join(voiced);
+    // Raw PCM chunks join, then get one WAV header for the whole chapter.
+    const audio = ext === 'wav' ? voiced[0] : ext === 'pcm' ? wav(join(voiced), rate) : join(voiced);
+    if (ext === 'pcm') ext = 'wav';
     const file = `${id}/${idx}.${ext}`;
     await Bun.write(pathJoin(AUDIO_DIR, file), audio);
     db.query('INSERT INTO tracks (generation_id, idx, title, file) VALUES (?, ?, ?, ?)').run(id, idx, chapter.title, file);

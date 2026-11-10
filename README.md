@@ -56,19 +56,20 @@ offline server: `bun exact.mjs test web`.
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | none | Key for the TTS provider; it stays on the server |
 | `TTS_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible speech API |
-| `TTS_MODELS` | the provider's audio models | Pin the model picker: `id=Name,id=Name` |
+| `TTS_MODELS` | Fish Audio S2.1 Pro (free), HeyGen Voice Turbo (free), Gemini 3.8 Flash Lite TTS, Gemini 3.8 Flash TTS | Replace the model picker: `id=Name,id=Name` |
 | `DB` | `data.db` | SQLite file |
 | `AUDIO_DIR` | `audio/` beside `DB` | Where chapter files are written |
 
 `bun server/index.ts --offline` searches a two-book fixture and voices with silence, so it works
 without a network or a key.
 
-## Not yet verified
+## OpenRouter speech
 
-This was built without network access to OpenRouter. `server/tts.ts` assumes an
-OpenAI-style `POST /audio/speech` (`model`, `input`, `voice`, `response_format: "mp3"`) and a
-model list filtered by `output_modalities=audio`. If OpenRouter's speech API differs, that one
-file changes.
+`server/tts.ts` calls `POST /audio/speech` and reads each model's voices from
+`GET /models?output_modalities=speech` (`supported_voices`); the app's Voice picker shows them, and
+an unset voice uses the model's first. HeyGen answers only in 16-bit PCM, so its chunks are joined
+and saved as one WAV per chapter; the others are MP3. Run the server from the repo root so Bun loads
+`.env`, or pass `--env-file`.
 
 ## Next
 
