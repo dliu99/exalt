@@ -5,7 +5,7 @@
 #   API_BASE_URL=https://exalt-api.onrender.com sh deploy/web.sh --prod   (production)
 set -eu
 cd "$(dirname "$0")/.."
-: "${API_BASE_URL:?set API_BASE_URL to the server's public address, e.g. https://exalt-api.onrender.com}"
+: "${API_BASE_URL:?set API_BASE_URL to the server public address, e.g. https://exalt-api.onrender.com}"
 case "$API_BASE_URL" in https://*) ;; *) echo "API_BASE_URL should be https:// (the site is served over https)"; exit 1 ;; esac
 rm -rf dist
 bun exact.mjs web-build --out dist
