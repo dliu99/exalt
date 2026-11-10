@@ -35,6 +35,7 @@ shape BookDetail
 shape Model
   id: string
   name: string
+  voices: string[]
 
 shape Track
   idx: number
@@ -82,6 +83,7 @@ component App
   derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }
   derive working = detail.versions.filter(v => v.status == "queued" or v.status == "working").length > 0
   derive ready = detail.versions.filter(v => v.status == "ready")
+  derive voices = match first(models.filter(m => m.id == model)) { case some(m) => m.voices, case none => [] }
   derive createError = match created { case some(r) => r.error, case none => "" }
   derive canCreate = filePath != "" and model != "" and rights and not pending(created)
   derive createHint = pending(created) ? "Uploading…" : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
@@ -118,6 +120,7 @@ component App
     fileName = match first(files) { case some(f) => f.name, case none => fileName }
   action pickModel(v: string)
     model = v
+    voice = ""
   action editVoice(v: string)
     voice = v
   action editMe(v: string)
@@ -233,8 +236,13 @@ component App
                     option "Choose…" value=""
                     for m in models key=m.id
                       option m.name value=m.id
-                row
-                  input value=voice input=editVoice placeholder="Voice (optional)" aria-label="Voice" flex=1 min-width=0 testId="voice"
+                if voices.length > 0
+                  row
+                    text "Voice"
+                    select value=voice change=editVoice aria-label="Voice" testId="voice"
+                      option "Default" value=""
+                      for v in voices key=v
+                        option v value=v
               section
                 row
                   input value=me input=editMe placeholder="Your name (optional)" aria-label="Your name" flex=1 min-width=0 testId="me"
