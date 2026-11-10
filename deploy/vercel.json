@@ -2,6 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": false,
   "rewrites": [
+    { "source": "/home", "destination": "/shell.html" },
+    { "source": "/explore", "destination": "/shell.html" },
+    { "source": "/voices", "destination": "/shell.html" },
     { "source": "/book/:id", "destination": "/shell.html" },
     { "source": "/book/:id/create", "destination": "/shell.html" },
     { "source": "/play/:gen", "destination": "/shell.html" }
