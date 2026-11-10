@@ -28,3 +28,13 @@ command confused you, record it: `bun exact.mjs feedback note "<what happened>"`
 exact2's commit and the last exit code, never output or code. `bun exact.mjs feedback status` says
 whether notes are sent and whether to keep a diary; under `never`, skip all of this.
 <!-- exact:end -->
+
+## Exalt: every feature
+
+Only rules that apply to every feature belong here; keep this section under 15 lines. Details
+live in the code's comments and tests.
+
+- **Keyboard first.** Everything works without a pointer: Tab reaches each control, Enter or
+  Space acts, Escape closes what opened (a list, a sheet, a menu) without losing input, and
+  arrow keys move through lists and suggestions. Mark the roles a screen reader needs (`listbox`,
+  `option`, `aria-selected`). Each feature's tests drive it by key (`type "<id>" key "ArrowDown"`).

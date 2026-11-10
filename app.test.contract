@@ -52,3 +52,25 @@ test "enter shows every result and closes the suggestions"
   clock data
   expect tree missing "suggestions"
   expect tree has "book-OL2W"
+
+test "the keyboard moves through suggestions, opens one, and escape closes them"
+  type "search" "rivers"
+  clock +300
+  clock data
+  type "search" key "ArrowDown"
+  type "search" key "ArrowDown"
+  expect state highlight == 0
+  type "search" key "ArrowUp"
+  expect state highlight == -1
+  type "search" key "Escape"
+  expect tree missing "suggestions"
+  expect state query == "rivers"
+  type "search" "rivers!"
+  type "search" "rivers"
+  clock +300
+  clock data
+  expect tree has "suggestions"
+  type "search" key "ArrowDown"
+  type "search" key "Enter"
+  clock data
+  expect text "book-title" == "Notes on Rivers"

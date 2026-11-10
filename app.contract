@@ -79,6 +79,7 @@ component App
   state suggestFor = ""
   state suggestOpen = false
   state leaving = false
+  state highlight = -1
   resource suggestions = suggestBooks(suggestFor) as shape Book[] else empty()
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
@@ -92,6 +93,9 @@ component App
   derive canCreate = filePath != "" and model != "" and rights and not pending(created)
   derive createHint = pending(created) ? "Uploading…" : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
+  derive suggestionCount = suggestions.length < 6 ? suggestions.length : 6
+  // at(-1) is the last suggestion, so nothing highlighted is checked first.
+  derive highlightId = highlight < 0 ? "" : match suggestions.at(highlight) { case some(b) => b.id, case none => "" }
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
   // While an audiobook is being made, its page follows the progress.
@@ -112,6 +116,7 @@ component App
   action search(v: string)
     query = v
     suggestOpen = true
+    highlight = -1
     if v.trim() == ""
       asked = ""
   action ask
@@ -119,6 +124,7 @@ component App
     suggestOpen = false
   action takeSuggest
     suggestFor = query.trim()
+    highlight = -1
   action fieldFocus
     leaving = false
     suggestOpen = true
@@ -127,6 +133,27 @@ component App
   action closeSuggest
     leaving = false
     suggestOpen = false
+    highlight = -1
+  // The field's keys while suggestions show: ↓ and ↑ move through them, Enter opens the one
+  // highlighted (else Enter shows every result, as ever), Escape closes them and keeps the text.
+  action searchKey(k: string, e: KeyboardEvent)
+    if showSuggestions and not e.isComposing
+      if k == "ArrowDown"
+        highlight = highlight + 1 < suggestionCount ? highlight + 1 : highlight
+        preventDefault()
+      if k == "ArrowUp"
+        highlight = highlight > -1 ? highlight - 1 : -1
+        preventDefault()
+      if k == "Enter" and highlightId != ""
+        openSuggestion(highlightId)
+        preventDefault()
+      if k == "Escape"
+        closeSuggest()
+        preventDefault()
+  action openSuggestion(id: string)
+    suggestOpen = false
+    highlight = -1
+    nav = push(nav, path("book", id))
   action back
     nav = back(nav)
   action follow(url: string)
@@ -175,13 +202,13 @@ component App
             header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px" position="relative" z-index=2
               text "Exalt" role="heading" aria-level=1 flex=1
               column position="relative" width="100%"
-                input type="search" value=query input=search submit=ask focus=fieldFocus blur=fieldBlur placeholder="Title or author"
+                input type="search" value=query input=search submit=ask key=searchKey focus=fieldFocus blur=fieldBlur placeholder="Title or author"
                   aria-label="Search Books" testId="search" width="100%"
                 if showSuggestions
                   column role="listbox" aria-label="Suggestions" testId="suggestions" position="absolute" top="100%" left=0 right=0 margin-top=6 z-index=10
                     background-color="-exact-secondary-grouped-background" border-radius=12 overflow="hidden" box-shadow="0 8px 24px rgba(0, 0, 0, 0.25)"
                     for b in suggestions.slice(0, 6) key=b.id
-                      SuggestionRow(book=b)
+                      SuggestionRow(book=b, active=(b.id == highlightId))
             if asked != ""
               if searchError != ""
                 EmptyState(symbol="symbol:alert", title="Can’t Search", message=searchError)
@@ -316,8 +343,10 @@ component App
 component SuggestionRow
   props
     book: Book
+    active: bool
   view
-    link href=path("book", book.id) role="option" testId=`suggest-${book.id}` padding="8px 12px"
+    link href=path("book", book.id) role="option" aria-selected=active testId=`suggest-${book.id}` padding="8px 12px"
+      background-color=(active ? "-exact-fill" : "transparent")
       row gap=10 align-items="center" flex=1 min-width=0
         Cover(src=book.cover, size=36)
         column flex=1 min-width=0 gap=1
