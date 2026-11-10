@@ -6,7 +6,8 @@ import { rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { db, tracksOf, type GenerationRow } from './db.ts';
 import { type Chapter, chunks, parseBook } from './parse.ts';
-import { speak, wav } from './tts.ts';
+import { speak } from './tts.ts';
+import { compress, requireEncoder, STORED_BYTES_PER_SECOND } from './encode.ts';
 import { AUDIO_DIR, SCRATCH_DIR, requireDiskSpace, saveAudio, storageKind } from './storage.ts';
 import { MAX_TEXT_CHARS, MAX_GENERATION_BYTES } from './limits.ts';
 import { lg } from './libgen.ts';
@@ -30,9 +31,16 @@ db.run(`UPDATE generations SET status = 'failed', error = 'The server restarted 
 db.run("UPDATE generations SET status = 'queued' WHERE status = 'working'");
 
 function checkCapacity() {
+  requireEncoder();
   requireDiskSpace();
   const used = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks').get() as { n: number }).n;
   if (MAX_AUDIO_BYTES && used >= MAX_AUDIO_BYTES) throw new QueueFull('Audio storage is full. Try again after storage is expanded.');
+}
+// Whether `adding` stored bytes would pass this audiobook's cap or the server's.
+function overLimit(id: number, adding: number) {
+  const total = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks WHERE generation_id = ?').get(id) as { n: number }).n;
+  const all = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks').get() as { n: number }).n;
+  return total + adding > MAX_GENERATION_BYTES || (MAX_AUDIO_BYTES > 0 && all + adding > MAX_AUDIO_BYTES);
 }
 // Reserve a slot before reading uploads or resolving a remote source; concurrent requests
 // cannot all pass admission checks and then allocate a full book each.
@@ -108,38 +116,32 @@ async function run(g: GenerationRow, chapters: Chapter[]) {
     if (done.has(idx)) continue;
     const path = join(SCRATCH_DIR, `${g.id}-${idx}.partial`);
     const file = await open(path, 'w');
-    let ext = '', rate = 44100, bytes = 0, pcm = false;
+    // A chapter is raw PCM (its parts' samples) or MP3 (its parts' frames) until it is compressed.
+    let pcm: boolean | undefined, rate = 0, raw = 0;
     try {
       for (const text of chunks(`${chapter.title}. ${chapter.text}`)) {
         checkCapacity();
         const v = await speak(g.model, g.voice, text);
-        const thisPcm = v.ext === 'pcm' || v.ext === 'wav';
-        if (ext && (pcm !== thisPcm || (pcm && rate !== (v.rate ?? (v.ext === 'wav' ? 8000 : 44100))))) throw new Error('The speech provider changed audio formats mid-chapter.');
-        if (!ext) {
-          pcm = thisPcm; ext = pcm ? 'wav' : 'mp3'; rate = v.rate ?? (v.ext === 'wav' ? 8000 : 44100);
-          if (pcm) { await file.write(new Uint8Array(44)); bytes += 44; }
-        }
+        const thisRate = v.ext === 'wav' ? new DataView(v.audio.buffer, v.audio.byteOffset, 44).getUint32(24, true) : v.rate ?? 0;
+        if (pcm !== undefined && (pcm !== (v.ext !== 'mp3') || rate !== thisRate)) throw new Error('The speech provider changed audio formats mid-chapter.');
+        pcm = v.ext !== 'mp3'; rate = thisRate;
         const audio = v.ext === 'wav' ? v.audio.subarray(44) : v.audio;
-        bytes += audio.length;
-        const total = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks WHERE generation_id = ?').get(g.id) as { n: number }).n;
-        const all = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks').get() as { n: number }).n;
-        if (total + bytes > MAX_GENERATION_BYTES || (MAX_AUDIO_BYTES && all + bytes > MAX_AUDIO_BYTES)) throw new Error('The audiobook reached the audio storage limit.');
+        raw += audio.length;
+        // Until it is compressed, PCM counts as what its length will take stored; MP3 as itself, its most.
+        if (overLimit(g.id, pcm ? Math.ceil(raw / (rate * 2) * STORED_BYTES_PER_SECOND) : raw)) throw new Error('The audiobook reached the audio storage limit.');
         // A chapter is streamed to scratch; no whole audiobook or chapter audio in memory.
         await file.writeFile(audio);
       }
-      if (pcm) {
-        const header = wav(new Uint8Array(0), rate);
-        const view = new DataView(header.buffer); view.setUint32(4, bytes - 8, true); view.setUint32(40, bytes - 44, true);
-        await file.write(header, 0, 44, 0);
-      }
       await file.sync(); await file.close();
-      const name = `${g.id}/${idx}.${ext}`;
-      const storage = await saveAudio(name, path);
+      const stored = await compress(path, pcm ? rate : undefined);
+      if (overLimit(g.id, stored.bytes)) throw new Error('The audiobook reached the audio storage limit.');
+      const name = `${g.id}/${idx}.${stored.ext}`;
+      const storage = await saveAudio(name, stored.path);
       db.transaction(() => {
-        db.query('INSERT OR REPLACE INTO tracks (generation_id, idx, title, file, bytes, storage) VALUES (?, ?, ?, ?, ?, ?)').run(g.id, idx, chapter.title, name, bytes, storage);
+        db.query('INSERT OR REPLACE INTO tracks (generation_id, idx, title, file, bytes, storage) VALUES (?, ?, ?, ?, ?, ?)').run(g.id, idx, chapter.title, name, stored.bytes, storage);
         db.query('UPDATE generations SET done = done + 1 WHERE id = ?').run(g.id);
       })();
-    } finally { await file.close().catch(() => {}); rmSync(path, { force: true }); }
+    } finally { await file.close().catch(() => {}); rmSync(path, { force: true }); rmSync(`${path}.m4a`, { force: true }); }
   }
 }
 // Begin recovery after imports and route setup have completed.

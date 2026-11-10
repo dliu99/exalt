@@ -28,6 +28,7 @@ domain or that they hold the rights to share it.
 | `server/db.ts` | SQLite schema: `books`, `generations`, `tracks` |
 | `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
 | `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
+| `server/encode.ts` | Compresses each narrated chapter to AAC in M4A with ffmpeg before it is stored |
 | `server/jobs.ts` | Durable SQLite queue, admission limits and chapter checkpoints |
 | `server/libgen.ts` | LibGen discovery, JSON metadata and verified downloads |
 | `server/storage.ts` | Local or S3-compatible chapter audio storage |
@@ -47,6 +48,10 @@ git clone https://github.com/expo/exact.git ../exact && (cd ../exact && bun scri
 ```bash
 (cd server && bun install)
 ```
+
+The server compresses narration with [ffmpeg](https://ffmpeg.org), which must be on `PATH`
+(`brew install ffmpeg`, `apt install ffmpeg`; the Dockerfile installs it). Without it the
+server still runs, but refuses to make audiobooks.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... bun server/index.ts
@@ -69,8 +74,8 @@ offline server: `bun exact.mjs test web`.
 | `DB` | `data.db` | SQLite file |
 | `AUDIO_DIR` | `audio/` beside `DB` | Local audio and scratch directory (on persistent disk) |
 | `MAX_BOOK_CHARACTERS` | 5000000 | Maximum extracted characters in one book |
-| `MAX_GENERATION_BYTES` | 2 GiB | Maximum stored audio bytes for one generation |
-| `AUDIO_MAX_BYTES` | 8 GiB local; 0 with S3 | Cap on recorded chapter bytes; 0 means no aggregate cap |
+| `MAX_GENERATION_BYTES` | 2 GiB | Maximum stored (compressed) audio bytes for one generation |
+| `AUDIO_MAX_BYTES` | 8 GiB local; 0 with S3 | Cap on stored (compressed) chapter bytes; 0 means no aggregate cap |
 | `LIBGEN_ENABLED` | `1` | Set to `0` to disable LibGen search and downloads |
 | `LIBGEN_MIRRORS` | `https://libgen.li,https://libgen.bz` | Comma-separated trusted HTTPS origins |
 | `LIBGEN_DOWNLOAD_ORIGINS` | none | Additional exact trusted HTTPS origins for file redirects |
@@ -101,18 +106,37 @@ availability can change; this is an optional external provider, not an uptime gu
 | Book metadata, accounts, hashed sessions, source IDs/hashes, narration settings and progress | SQLite at `DB` | Retained |
 | Queued source reference or extracted chapter text | SQLite `generation_jobs` | Removed on completion or failure |
 | Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
-| Incomplete chapter audio | `AUDIO_DIR/.tmp` | Removed after upload/failure; interrupted chapter is overwritten on resume |
-| Finished chapter audio | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
+| Incomplete chapter audio (raw PCM or MP3) | `AUDIO_DIR/.tmp` | Removed after compression and upload, or failure; interrupted chapter is overwritten on resume |
+| Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
 | Listening position and voice preference | The listener's device | Until cleared |
 
 The backend runs **one instance and one generation worker**. SQLite is a durable queue:
 a restart resumes queued work and skips completed chapters. An interrupted chapter may
 repeat TTS calls; completed chapters do not. New jobs are capped at 20 pending globally and
 two per account. Concurrent upload parsing is capped at two. Books default to a limit of five
-million extracted characters, and each generated audiobook to 2 GiB. EPUB expansion is
+million extracted characters, and each generated audiobook to 2 GiB stored. EPUB expansion is
 bounded and chapter audio is written to scratch chunk by chunk, rather than accumulated
 in memory. Transient TTS failures retry up to three attempts. The same source, book, model
 and voice reuse an existing queued/working/ready generation instead of generating again.
+
+### Audio format and size
+
+Each chapter is stored as **AAC-LC, 32 kbps mono at 24 kHz, in an M4A file**: about
+**15 MB per hour** of narration, so a typical 10-hour audiobook takes about 150 MB. The
+providers answer in MP3 (Fish Audio, Gemini) or raw 16-bit PCM (HeyGen), which as WAV is
+~317 MB per hour at 44.1 kHz, up to ~3 GB a book. A finished chapter is compressed with
+ffmpeg from its scratch file before it is stored; an MP3 that compression would not shrink
+by at least a third (one already near 32 kbps) is kept as the provider made it. Storage
+limits count the stored, compressed bytes; while a chapter is still being narrated its PCM
+counts as what its length will take compressed.
+
+AAC rather than Opus: the iOS app supports iOS 17 and plays through AVPlayer, which opens
+Ogg Opus only from iOS 18.4 (and misreports its length) and WebM not at all, and Safari reads
+Ogg Opus only from 18.4 too. M4A plays in AVPlayer and in every browser's `<audio>`. Chapters stored before compression (`.mp3`, `.wav`) keep playing as they are,
+with their own content types; they are not re-encoded.
+
+At 15 MB an hour, the default 8 GiB local cap holds about 570 hours (some 55 ten-hour
+books), and a bucket of 1,000 such books is about 150 GB.
 
 The Render blueprint mounts a 10 GB persistent disk. The default 8 GiB audio cap and a
 256 MiB free-space check stop work before normal audio growth consumes the disk; queue,
@@ -137,12 +161,12 @@ AUDIO_S3_SECRET_ACCESS_KEY=your-server-secret-key
 ```
 
 Use the actual AWS region for AWS S3. Keys remain server-side. The worker writes a chapter
-locally, uploads it to `audio/<generation>/<chapter>.mp3` (or `.wav`), then publishes the
+locally, compresses it, uploads it to `audio/<generation>/<chapter>.m4a` (`audio/mp4`), then publishes the
 track row and deletes the scratch copy. `/audio/...` redirects S3 tracks to a signed GET URL
 valid for one hour, so the bucket serves playback/byte ranges directly. Configure bucket
 CORS to allow the app's origins, GET/HEAD, the Range header, and exposure of Content-Range,
-Accept-Ranges and Content-Length. MP3 is used where supported; PCM-only models are stored
-as WAV, which consumes considerably more space.
+Accept-Ranges and Content-Length. Objects keep the content type they were uploaded with,
+so older `.mp3` and `.wav` objects still play.
 
 SQLite records each track's storage backend, so existing local tracks keep playing after S3
 is enabled. Existing files are not automatically migrated, and changing buckets/endpoints

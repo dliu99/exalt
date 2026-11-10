@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { wav } from './tts.ts';
+import { chunks } from './parse.ts';
 
 async function start(dir: string, extra: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, 'server/index.ts', '--offline'], {
@@ -45,6 +46,10 @@ test('restart resumes the durable queue, keeps completed chapters and deletes te
     const first = wav(new Uint8Array(32).fill(7), 8000);
     await Bun.write(join(dir, 'audio', String(id), '0.wav'), first);
     db.query("INSERT INTO tracks (generation_id,idx,title,file,bytes,storage) VALUES (?,0,'Kept chapter',?,?, 'local')").run(id, `${id}/0.wav`, first.length);
+    // An MP3 audiobook from before compression, also kept as it was.
+    const old = Number(db.query("INSERT INTO generations (book_id,made_by,model,voice,source_name,status,created_at) VALUES ('OL1W','test','exalt/silence','','old.txt','ready',0)").run().lastInsertRowid);
+    await Bun.write(join(dir, 'audio', String(old), '0.mp3'), new Uint8Array([0x49, 0x44, 0x33, 4]));
+    db.query("INSERT INTO tracks (generation_id,idx,title,file,bytes,storage) VALUES (?,0,'Old chapter',?,4,'local')").run(old, `${old}/0.mp3`);
     db.close();
     server = await start(dir);
     const gen = await finished(server.address, id);
@@ -54,11 +59,25 @@ test('restart resumes the durable queue, keeps completed chapters and deletes te
     const check = new Database(join(dir, 'db.sqlite'));
     expect(check.query('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 });
     check.close();
-    // The second chapter crosses TTS chunk boundaries; every PCM chunk belongs in the WAV.
-    const second = Bun.file(join(dir, 'audio', String(id), '1.wav'));
-    expect(second.size).toBeGreaterThan(16044);
-    const header = new DataView(await second.slice(0, 44).arrayBuffer());
-    expect(header.getUint32(40, true)).toBe(second.size - 44);
+    // Chapters stored before compression still play, as what they are.
+    const kept = await fetch(`${server.address}${gen.tracks[0].src}`);
+    expect(kept.headers.get('content-type')).toBe('audio/wav');
+    expect(new Uint8Array(await kept.arrayBuffer())).toEqual(first);
+    const older = await fetch(`${server.address}/audio/${old}/0.mp3`);
+    expect(older.headers.get('content-type')).toBe('audio/mpeg');
+    expect((await older.arrayBuffer()).byteLength).toBe(4);
+    // The second chapter crosses TTS chunk boundaries: every chunk's second of PCM is in its M4A.
+    expect(gen.tracks[1].src).toBe(`/audio/${id}/1.m4a`);
+    const second = join(dir, 'audio', String(id), '1.m4a');
+    const parts = chunks(`${chapter(2).title}. ${chapter(2).text}`).length;
+    expect(parts).toBeGreaterThan(1);
+    const seconds = Number(Bun.spawnSync(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', second]).stdout.toString());
+    expect(Math.abs(seconds - parts)).toBeLessThan(0.1);
+    const size = Bun.file(second).size;
+    expect(size).toBeLessThan(parts * 16000 / 4);
+    const rows = new Database(join(dir, 'db.sqlite'));
+    expect(rows.query('SELECT bytes FROM tracks WHERE generation_id = ? AND idx = 1').get(id)).toEqual({ bytes: size });
+    rows.close();
     expect(readdirSync(join(dir, 'audio', '.tmp'))).toEqual([]);
   } finally { await server?.stop(); rmSync(dir, { recursive: true, force: true }); }
 }, 10000);
@@ -70,7 +89,8 @@ test('S3 storage uploads chapter audio and playback redirects to a signed object
     const path = new URL(req.url).pathname;
     if (req.method === 'PUT') {
       expect(req.headers.get('authorization')).toContain('AWS4-HMAC-SHA256');
-      expect(req.headers.get('content-type')).toBe('audio/wav');
+      expect(path).toEndWith('.m4a');
+      expect(req.headers.get('content-type')).toBe('audio/mp4');
       objects.set(path, new Uint8Array(await req.arrayBuffer())); return new Response('', { headers: { etag: '"test"' } });
     }
     if (req.method === 'GET') return new Response(objects.get(path) ?? null, { status: objects.has(path) ? 200 : 404 });
@@ -88,12 +108,12 @@ test('S3 storage uploads chapter audio and playback redirects to a signed object
     expect(playback.status).toBe(302);
     const location = new URL(playback.headers.get('location')!);
     expect(location.searchParams.has('X-Amz-Signature')).toBe(true);
-    const audio = await fetch(location);
-    expect((await audio.arrayBuffer()).byteLength).toBeGreaterThan(44);
+    const audio = new Uint8Array(await fetch(location).then((r) => r.arrayBuffer()));
+    expect(new TextDecoder().decode(audio.subarray(4, 8))).toBe('ftyp');
     const check = new Database(join(dir, 'db.sqlite'));
     expect(check.query('SELECT storage FROM tracks WHERE generation_id = ?').get(id)).toEqual({ storage: 's3' });
     expect(check.query('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 }); check.close();
-    expect(await Bun.file(join(dir, 'audio', String(id), '0.wav')).exists()).toBe(false);
+    expect(await Bun.file(join(dir, 'audio', String(id), '0.m4a')).exists()).toBe(false);
     expect(readdirSync(join(dir, 'audio', '.tmp'))).toEqual([]);
   } finally { await server?.stop(); s3.stop(true); rmSync(dir, { recursive: true, force: true }); }
 }, 10000);
