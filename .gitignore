@@ -10,3 +10,4 @@
 /data.db*
 /audio/
 /server/node_modules/
+/.conductor/settings.local.toml

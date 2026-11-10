@@ -47,6 +47,14 @@ shape BookDetail
   book: Book
   versions: Version[]
 
+shape BookSource
+  id: string
+  label: string
+
+shape BookSources
+  available: bool
+  files: BookSource[]
+
 shape Model
   id: string
   name: string
@@ -144,13 +152,13 @@ fn mag(x: number): number = max(x, -x)
 fn two(n: number): string = n < 10 ? `0${n}` : `${n}`
 fn clock(s: number): string = s >= 3600 ? `${floor(s / 3600)}:${two(floor(s / 60) % 60)}:${two(floor(s) % 60)}` : `${floor(max(0, s) / 60)}:${two(floor(max(0, s)) % 60)}`
 fn placeFrac(p: Place): number = p.tracks == 0 ? 0 : min(1, (p.track + (p.duration > 0 ? p.time / p.duration : 0)) / p.tracks)
-fn mineText(m: Mine): string = m.status == "ready" ? `${m.total} ${m.total == 1 ? "chapter" : "chapters"}` : m.status == "failed" ? "Didn’t finish" : m.status == "queued" ? "Waiting to start…" : `Voicing ${m.done} of ${m.total}…`
+fn mineText(m: Mine): string = m.status == "ready" ? `${m.total} ${m.total == 1 ? "chapter" : "chapters"}` : m.status == "failed" ? "Didn’t finish" : m.status == "queued" ? "Waiting to start…" : m.total == 0 ? "Preparing book…" : `Voicing ${m.done} of ${m.total}…`
 fn readBy(v: Version): string = v.voiceName != "" ? v.voiceName : v.model
 fn nextRate(r: number): number = r == 1 ? 1.25 : r == 1.25 ? 1.5 : r == 1.5 ? 2 : r == 2 ? 0.75 : 1
 fn rateText(r: number): string = r == 1 ? "1×" : r == 1.25 ? "1.25×" : r == 1.5 ? "1.5×" : r == 2 ? "2×" : "0.75×"
 fn byline(b: Book): string = b.year > 0 ? `${b.author} · ${b.year}` : b.author
 fn versionsText(n: number): string = n == 0 ? "" : n == 1 ? "1 audiobook" : `${n} audiobooks`
-fn statusText(v: Version): string = v.status == "ready" ? `${v.total} ${v.total == 1 ? "chapter" : "chapters"}` : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : `Voicing ${v.done} of ${v.total}…`
+fn statusText(v: Version): string = v.status == "ready" ? `${v.total} ${v.total == 1 ? "chapter" : "chapters"}` : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : v.total == 0 ? "Preparing book…" : `Voicing ${v.done} of ${v.total}…`
 fn goodreads(b: Book): string = `https://www.goodreads.com/search?q=${encodeURIComponent(b.title + " " + b.author)}`
 fn trackTitle(a: Audiobook, i: number): string = match a.tracks.at(i) { case some(t) => t.title, case none => "" }
 fn trackSrc(a: Audiobook, i: number): string = match a.tracks.at(i) { case some(t) => t.src, case none => "" }
@@ -161,6 +169,7 @@ component App
   state me = "" persist
   state filePath = ""
   state fileName = ""
+  state sourceId = ""
   state model = ""
   state voice = ""
   state rights = false
@@ -199,6 +208,7 @@ component App
   resource suggestions = suggestBooks(suggestFor) as shape Book[] else empty()
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
+  resource bookSources = loadBookSources(top(nav).name == "create" ? bookId : "") as shape BookSources else empty(available=false, files=[])
   resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
   mutation created as shape Reply refreshes detail, listening, account, mine then afterCreate
   // Home: where the listener left off, what they made, and the voice they read in.
@@ -233,8 +243,8 @@ component App
   derive ready = detail.versions.filter(v => v.status == "ready")
   derive voices = match first(models.filter(m => m.id == model)) { case some(m) => m.voices, case none => [] }
   derive createError = match created { case some(r) => r.error, case none => "" }
-  derive canCreate = account.signedIn and filePath != "" and model != "" and rights and not pending(created)
-  derive createHint = pending(created) ? "Uploading…" : not account.signedIn ? "Sign in to make an audiobook." : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
+  derive canCreate = account.signedIn and (filePath != "" or sourceId != "") and model != "" and rights and not pending(created)
+  derive createHint = pending(created) ? (sourceId != "" ? "Downloading book and preparing audiobook…" : "Uploading…") : not account.signedIn ? "Sign in to make an audiobook." : filePath == "" and sourceId == "" ? "Choose a book file or upload your own." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
@@ -348,6 +358,7 @@ component App
   action follow(url: string)
     nav = go(nav, url)
   action openCreate
+    sourceId = ""
     filePath = ""
     fileName = ""
     rights = false
@@ -356,7 +367,13 @@ component App
     nav = push(nav, path("create", bookId))
   action chooseFile
     showPicker("upload")
+  action pickSource(v: string)
+    sourceId = v
+    filePath = ""
+    fileName = ""
+    refusal = ""
   action picked(files: Picked[])
+    sourceId = match first(files) { case some(f) => "", case none => sourceId }
     filePath = match first(files) { case some(f) => f.path, case none => filePath }
     fileName = match first(files) { case some(f) => f.name, case none => fileName }
   action pickModel(v: string)
@@ -370,7 +387,7 @@ component App
     rights = on
   action create
     if canCreate
-      send created = createAudiobook(bookId, filePath, fileName, model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
+      send created = createAudiobook(bookId, filePath, fileName, sourceId, model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
   action afterCreate
     refusal = createError
     if createError == "" and top(nav).name == "create"
@@ -700,67 +717,88 @@ component App
               text "New Audiobook" role="heading" font-family="Jost" font-weight=500
               button press=create buttonStyle="bordered-prominent" aria-label="Make" testId="create-save" disabled=(not canCreate)
                 image "symbol:checkmark"
-            list id="create-form" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
-              if not account.signedIn
+            scroll id="create-form" flex=1 min-height=0
+              list appearance="auto" listStyle="inset-grouped" padding-bottom=80
+                if not account.signedIn
+                  section
+                    header
+                      text "Account"
+                    column gap=10 padding-top=8 padding-bottom=8
+                      text "Sign in to make an audiobook. Listening needs no account." color="-exact-secondary-label" testId="sign-in-note"
+                      if identities.providers.apple.active
+                        exact-sign-in-button provider="apple" press=appleSignIn testId="apple-sign-in" width="100%" height=44
+                      if identities.providers.google.active
+                        exact-sign-in-button provider="google" press=googleSignIn testId="google-sign-in" width="100%" height=44
+                      if signInError != ""
+                        text signInError color="-exact-system-red" font="-exact-footnote" testId="sign-in-error"
+                if refusal != "" or createHint != ""
+                  section
+                    row
+                      text (refusal != "" ? refusal : createHint) flex=1 min-width=0 font="-exact-footnote"
+                        color=(refusal != "" ? "-exact-system-red" : "-exact-secondary-label") testId="create-hint"
                 section
                   header
-                    text "Account"
-                  column gap=10 padding-top=8 padding-bottom=8
-                    text "Sign in to make an audiobook. Listening needs no account." color="-exact-secondary-label" testId="sign-in-note"
-                    if identities.providers.apple.active
-                      exact-sign-in-button provider="apple" press=appleSignIn testId="apple-sign-in" width="100%" height=44
-                    if identities.providers.google.active
-                      exact-sign-in-button provider="google" press=googleSignIn testId="google-sign-in" width="100%" height=44
-                    if signInError != ""
-                      text signInError color="-exact-system-red" font="-exact-footnote" testId="sign-in-error"
-              section
-                header
-                  text "Book file"
-                row
-                  text (fileName == "" ? "EPUB, PDF or TXT" : fileName) flex=1 min-width=0
-                    color=(fileName == "" ? "-exact-secondary-label" : "-exact-label") testId="file-name"
-                  button press=chooseFile testId="choose-file"
-                    text (fileName == "" ? "Choose…" : "Change…")
-                  input type="file" id="upload" display="none" change=picked testId="upload"
-              section
-                header
-                  text "Voice"
-                row
-                  text "Model"
-                  select value=model change=pickModel aria-label="Model" testId="model"
-                    option "Choose…" value=""
-                    for m in models key=m.id
-                      option m.name value=m.id
-                if fishModel
-                  link href=path("voices") testId="create-voice"
-                    text "Voice" flex=1
-                    text (voicePref.id == "" ? "Fish’s default" : voicePref.title) color="-exact-secondary-label"
-                    image "symbol:forward-chevron"
-                else if voices.length > 0
+                    text "Book file"
+                  if pending(bookSources)
+                    row
+                      progress aria-label="Finding book files"
+                      text "Finding EPUB and PDF files…" color="-exact-secondary-label"
+                  else if failed(bookSources)
+                    row
+                      text "Book downloads aren’t reachable. Upload a file or reopen this sheet to retry." color="-exact-secondary-label" testId="source-error"
+                  else if bookSources.available and bookSources.files.length > 0
+                    row
+                      text "Download"
+                      select value=sourceId change=pickSource aria-label="Book download" testId="book-source" min-width=0 max-width="100%"
+                        option "Choose a file…" value=""
+                        for f in bookSources.files key=f.id
+                          option f.label value=f.id
+                  else
+                    row
+                      text (bookSources.available ? "No EPUB or PDF download found. Upload your own file." : "Book downloads aren’t connected. Upload your own file.") color="-exact-secondary-label" testId="source-empty"
+                  if sourceId != ""
+                    row
+                      text "This file will be downloaded and narrated with your chosen voice." color="-exact-secondary-label" testId="source-note"
                   row
-                    text "Voice"
-                    select value=voice change=editVoice aria-label="Voice" testId="voice"
-                      option "Default" value=""
-                      for v in voices key=v
-                        option v value=v
-              section
-                if account.signedIn
-                  row
-                    text `Signed in as ${account.name}` flex=1 min-width=0 testId="account"
-                    button press=signOut testId="sign-out"
-                      text "Sign Out"
-                row
-                  input value=me input=editMe placeholder=(account.name == "" ? "Shown as (optional)" : `Shown as ${account.name}`) aria-label="Shown as" flex=1 min-width=0 testId="me"
-                row
-                  text "I may share this" flex=1
-                  input type="checkbox" switch checked=rights change=setRights aria-label="I may share this" testId="rights"
-                footer
-                  text "The audiobook is public. Upload only books in the public domain or ones you hold the rights to." testId="rights-note"
-              if refusal != "" or createHint != ""
+                    text (fileName == "" ? "EPUB, PDF or TXT" : fileName) flex=1 min-width=0
+                      color=(fileName == "" ? "-exact-secondary-label" : "-exact-label") testId="file-name"
+                    button press=chooseFile testId="choose-file"
+                      text (fileName == "" ? "Choose…" : "Change…")
+                    input type="file" id="upload" display="none" change=picked testId="upload"
                 section
+                  header
+                    text "Voice"
                   row
-                    text (refusal != "" ? refusal : createHint) flex=1 min-width=0 font="-exact-footnote"
-                      color=(refusal != "" ? "-exact-system-red" : "-exact-secondary-label") testId="create-hint"
+                    text "Model"
+                    select value=model change=pickModel aria-label="Model" testId="model"
+                      option "Choose…" value=""
+                      for m in models key=m.id
+                        option m.name value=m.id
+                  if fishModel
+                    link href=path("voices") testId="create-voice"
+                      text "Voice" flex=1
+                      text (voicePref.id == "" ? "Fish’s default" : voicePref.title) color="-exact-secondary-label"
+                      image "symbol:forward-chevron"
+                  else if voices.length > 0
+                    row
+                      text "Voice"
+                      select value=voice change=editVoice aria-label="Voice" testId="voice"
+                        option "Default" value=""
+                        for v in voices key=v
+                          option v value=v
+                section
+                  if account.signedIn
+                    row
+                      text `Signed in as ${account.name}` flex=1 min-width=0 testId="account"
+                      button press=signOut testId="sign-out"
+                        text "Sign Out"
+                  row
+                    input value=me input=editMe placeholder=(account.name == "" ? "Shown as (optional)" : `Shown as ${account.name}`) aria-label="Shown as" flex=1 min-width=0 testId="me"
+                  row
+                    text "I may share this" flex=1
+                    input type="checkbox" switch checked=rights change=setRights aria-label="I may share this" testId="rights"
+                  footer
+                    text "The audiobook is public. Use only books in the public domain or ones you hold the rights to." testId="rights-note"
         // The player, in the dark below the lander's fold: the book, the chapter, and the controls.
         if e.name == "play"
           column navigationKey=`${e.id}` navigationScroll="player" position="absolute" inset=0 background-color="#121419" testId="player"

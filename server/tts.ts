@@ -20,22 +20,25 @@ const DEFAULTS: Model[] = [
 const PCM_ONLY = (model: string) => model.startsWith('heygen/');
 
 let known: Model[] | undefined;
+let knownUntil = 0;
 
 // The chosen models, with the voices the provider lists for each (empty: the model picks).
 export async function listModels(offline: boolean): Promise<Model[]> {
   if (offline) return [FAKE];
+  if (known && Date.now() < knownUntil) return known;
   const pinned = (process.env.TTS_MODELS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
     .map((s) => { const [id, name] = s.split('='); return { id, name: name ?? id, voices: [] as string[] }; });
   const chosen = pinned.length ? pinned : DEFAULTS;
   let voices = new Map<string, string[]>();
   try {
-    const res = await fetch(`${BASE}/models?output_modalities=speech`, { headers: KEY ? { authorization: `Bearer ${KEY}` } : {} });
+    const res = await fetch(`${BASE}/models?output_modalities=speech`, { signal: AbortSignal.timeout(6000), headers: KEY ? { authorization: `Bearer ${KEY}` } : {} });
     if (res.ok) {
       const body = (await res.json()) as { data?: { id: string; supported_voices?: string[] | null }[] };
       voices = new Map((body.data ?? []).map((m) => [m.id, m.supported_voices ?? []]));
     }
   } catch { /* the picker still works; each model uses its own default voice */ }
   known = chosen.map((m) => ({ ...m, voices: voices.get(m.id) ?? m.voices }));
+  knownUntil = Date.now() + 600000;
   return known;
 }
 
@@ -45,12 +48,25 @@ export async function speak(model: string, voice: string, input: string): Promis
   // A model with a voice list needs one of them; the first is its default.
   if (!voice) voice = (known ?? await listModels(false)).find((m) => m.id === model)?.voices[0] ?? '';
   const pcm = PCM_ONLY(model);
-  const res = await fetch(`${BASE}/audio/speech`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, input, voice: voice || undefined, response_format: pcm ? 'pcm' : 'mp3' }),
-  });
-  if (!res.ok) throw new Error(`Speech failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  let res: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      res = await fetch(`${BASE}/audio/speech`, {
+        method: 'POST', signal: AbortSignal.timeout(90000),
+        headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, input, voice: voice || undefined, response_format: pcm ? 'pcm' : 'mp3' }),
+      });
+    } catch (e) {
+      if (attempt === 2) throw new Error('The speech provider did not respond after three attempts.');
+      await Bun.sleep(1000 * 2 ** attempt); continue;
+    }
+    if (res.ok) break;
+    if (attempt === 2 || (res.status !== 429 && res.status < 500)) throw new Error(`Speech failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    const retry = Number(res.headers.get('retry-after'));
+    await res.body?.cancel();
+    await Bun.sleep(Math.min(30000, Math.max(1000 * 2 ** attempt, Number.isFinite(retry) ? retry * 1000 : 0)));
+  }
+  if (!res?.ok) throw new Error('The speech provider is unavailable.');
   const audio = new Uint8Array(await res.arrayBuffer());
   if (!pcm) return { audio, ext: 'mp3' };
   const rate = Number(/rate=(\d+)/.exec(res.headers.get('content-type') ?? '')?.[1]) || 44100;

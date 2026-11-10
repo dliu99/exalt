@@ -8,6 +8,8 @@
 // them keep resolving whatever BOOK_PROVIDER is now: Hardcover ids prefixed (`hc-482336`),
 // Google Books volume ids prefixed (`gb-zyTCAlFPjgYC`), Open Library work ids as they are
 // (`OL123W`).
+import { lg } from './libgen.ts';
+import { zlib, type ZBook } from './zlibrary.ts';
 import { allBooksByAudio, type BookRow, getBook, link, linkedBook, mergeBooks, savedBooks, upsertBook } from './db.ts';
 
 // What a provider answers: a book, and the other names it goes by (its editions' ISBNs).
@@ -294,7 +296,18 @@ const hardcoverBooks: Provider = {
   },
 };
 
-const PROVIDERS = { hardcover: hardcoverBooks, google: googleBooks, openlibrary: openLibrary } as const;
+const zFound = (b: ZBook): Found => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, description: b.description, refs: [] });
+const zlibraryBooks: Provider = {
+  owns: (id) => /^zl-\d+-[a-zA-Z0-9]+$/.test(id),
+  search: async (q) => rank(q, (await zlib.search(q)).map((b) => ({ item: zFound(b), title: b.title, authors: [b.author], readers: 0, cover: !!b.cover, description: !!b.description }))),
+  fetch: async (id) => { const b = await zlib.book(id); return b ? zFound(b) : null; },
+};
+const libgenBooks: Provider = {
+  owns: (id) => /^lg-[a-f0-9]{32}$/.test(id),
+  search: async (q) => rank(q, (await lg.search(q)).map((b) => ({ item: zFound(b), title: b.title, authors: [b.author], readers: 0, cover: !!b.cover, description: !!b.description }))),
+  fetch: async (id) => zFound(await lg.book(id)),
+};
+const PROVIDERS = { libgen: libgenBooks, zlibrary: zlibraryBooks, hardcover: hardcoverBooks, google: googleBooks, openlibrary: openLibrary } as const;
 export const providerName = (process.env.BOOK_PROVIDER ?? 'google').toLowerCase() as keyof typeof PROVIDERS;
 if (!(providerName in PROVIDERS)) throw new Error(`BOOK_PROVIDER must be one of: ${Object.keys(PROVIDERS).join(', ')}`);
 
@@ -357,7 +370,15 @@ const namesOf = (f: Found) => [f.id, ...authorityOf(f), ...f.refs, workKey(f.tit
 export async function search(q: string, offline: boolean, provider: ProviderName = providerName): Promise<BookRow[]> {
   const terms = words(q).filter((w) => !STOP.has(w));
   const saved = savedBooks().filter((b) => terms.length > 0 && terms.every((t) => matches(words(`${b.title} ${b.author}`), t)));
-  const found = await providerSearch(q, offline, provider);
+  const includeZlib = !offline && zlib.configured && provider !== 'zlibrary';
+  const includeLibgen = !offline && lg.enabled && provider !== 'libgen';
+  const results = await Promise.allSettled([
+    providerSearch(q, offline, provider),
+    ...(includeZlib ? [providerSearch(q, false, 'zlibrary')] : []),
+    ...(includeLibgen ? [providerSearch(q, false, 'libgen')] : []),
+  ]);
+  if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
+  const found = results.flatMap((r) => r.status === 'fulfilled' ? r.value : []);
   if (!offline) await hardcoverBooksOf(found.flatMap(isbnsOf)).catch((e) => console.warn(`search: editions: ${(e as Error).message}`));
   const out: BookRow[] = [], seen = new Set<string>();
   const add = (b: BookRow, group = b.id) => {

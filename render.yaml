@@ -8,7 +8,7 @@ services:
     # A persistent disk needs a paid instance; the database and every audiobook live on it.
     plan: starter
     healthCheckPath: /health
-    # Jobs run inside the one process: one instance only.
+    # Durable SQLite queue, one worker: keep one instance until a shared DB/lease design is added.
     numInstances: 1
     disk:
       name: data
@@ -17,6 +17,13 @@ services:
     envVars:
       - key: DB
         value: /var/data/data.db
+      - key: AUDIO_MAX_BYTES
+        value: "8589934592"
+      - key: LIBGEN_ENABLED
+        value: "1"
+      - key: LIBGEN_MIRRORS
+        value: https://libgen.li,https://libgen.bz
+      # Optional AUDIO_S3_* settings are documented in README; leave unset for local audio.
       - key: BOOK_PROVIDER
         value: google
       - key: HARDCOVER_API_KEY

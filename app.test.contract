@@ -129,3 +129,22 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   tap "nav-home"
   clock data
   expect text "voice-name" == "The Reader"
+
+test "a LibGen file can be selected instead of uploading a book"
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  tap "make"
+  clock data
+  expect tree has "book-source"
+  type "book-source" "lg-00000000000000000000000000000001"
+  expect state sourceId == "lg-00000000000000000000000000000001"
+  expect state filePath == ""
+  expect tree has "source-note"
+  type "rights" "true"
+  expect state rights == true
+  expect text "create-hint" == "Sign in to make an audiobook."
