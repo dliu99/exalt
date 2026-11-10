@@ -607,6 +607,8 @@ component App
                       aria-label="Search Books" testId="search" width="100%" box-sizing="border-box" appearance="none"
                       font-family="Jost" font-weight=300 font-size=(wide ? 24 : 20) color="#14171f" background-color="transparent"
                       border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="10px 0" outline="none"
+                      ::placeholder
+                        color="#8a8f9c"
                     if showSuggestions
                       column role="listbox" aria-label="Suggestions" testId="suggestions" position="absolute" top="100%" left=0 right=0 margin-top=8 z-index=10
                         background-color="#f7f8fa" border-radius=10 overflow="hidden" box-shadow="0 18px 40px -12px rgba(20,24,36,0.35)" padding="6px 0"
@@ -625,26 +627,29 @@ component App
                       for b in found key=b.id
                         ResultRow(book=b)
             TopBar(active="explore", wide=wide)
-        // Voices: Fish Audio's licensed voices to start, and its whole community library by search.
+        // Voices: a recommended set to start, and Fish Audio's whole community library by search.
         if e.name == "voices"
           column navigationKey=`${e.id}` navigationScroll="voices-scroll" position="absolute" inset=0 background-color="#eceef2" testId="voices"
             scroll id="voices-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "88px 20px 72px") gap=32
                 column gap=12
                   text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
-                  text "The voice you choose reads the audiobooks you make. Start with Fish Audio’s licensed narrators, or search its community library." font-family="Jost" font-size=16 line-height=1.5 color="#4a4f5c" max-width=520
-                input type="search" value=voiceQuery input=editVoiceQuery placeholder="Search community voices" aria-label="Search Voices" testId="voice-search"
+                input type="search" value=voiceQuery input=editVoiceQuery placeholder="Search for more voices…" aria-label="Search Voices" testId="voice-search"
                   width="100%" max-width=480 box-sizing="border-box" appearance="none" font-family="Jost" font-weight=300 font-size=20 color="#14171f"
                   background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="8px 0" outline="none"
+                  ::placeholder
+                    color="#8a8f9c"
                 if pending(voiceList) and voiceList.length == 0
                   row justify-content="center" padding=40
                     progress aria-label="Loading voices"
                 else if voiceList.length == 0
                   text "No voices found." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-voices"
                 else
-                  column
-                    for v in voiceList key=v.id
-                      VoiceRow(voice=v, chosen=(v.id == voicePref.id), playing=(v.sample != "" and v.sample == auditioning), audition=audition, choose=chooseVoice)
+                  column gap=8
+                    SectionTitle(label=(voiceAsked == "" ? "Recommended" : "Community"))
+                    column
+                      for v in voiceList key=v.id
+                        VoiceRow(voice=v, chosen=(v.id == voicePref.id), playing=(v.sample != "" and v.sample == auditioning), audition=audition, choose=chooseVoice)
                 if auditioning != ""
                   audio src=auditioning autoplay=true ended=auditionEnded testId="audition"
             TopBar(active="home", wide=wide)
@@ -974,9 +979,9 @@ component VoiceRow
         button press=audition(voice.sample) appearance="none" aria-label=(playing ? "Stop sample" : "Hear sample") testId=`hear-${voice.id}`
           width=40 height=40 border-radius=999 display="flex" align-items="center" justify-content="center" border="1px solid rgba(20,23,31,0.25)" cursor="pointer" flex-shrink=0
           image (playing ? "symbol:stop-fill" : "symbol:play-fill") color="#14171f" width=12 height=12
-      row width=72 justify-content="flex-end" flex-shrink=0
+      row width=88 justify-content="flex-end" flex-shrink=0
         button press=choose(voice) appearance="none" testId=`use-${voice.id}` padding="4px 0" cursor="pointer"
-          text (chosen ? "✓ Yours" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
+          text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=(chosen ? 500 : 400) font-size=15 color="#14171f"
             border-bottom=(chosen ? "1px solid transparent" : "1px solid rgba(20,23,31,0.3)") padding-bottom=2
 
 keyframes settle

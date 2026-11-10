@@ -125,7 +125,7 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   expect tree has "voice-v-reader"
   tap "use-v-reader"
   clock data
-  expect text "use-v-reader" == "✓ Yours"
+  expect text "use-v-reader" == "✓ Selected"
   tap "nav-home"
   clock data
   expect text "voice-name" == "The Reader"
