@@ -33,12 +33,14 @@ Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
   '/search': { OPTIONS: preflight, GET: async (req) => {
     const params = new URL(req.url).searchParams;
     const q = params.get('q')?.trim() ?? '', provider = params.get('provider') ?? providerName;
+    // Suggestions under the field ask for a few (`limit`); the results page for all.
+    const limit = Math.min(25, Math.max(1, Number(params.get('limit')) || 25));
     if (!q) return send([]);
     if (!isProvider(provider)) return send({ error: `No book provider called ${provider}.` }, 400);
     try {
       const found = await search(q, OFFLINE, provider);
       const counts = readyCounts(found.map((b) => b.id));
-      return send(found.map((b) => bookJson(b, counts.get(b.id) ?? 0)));
+      return send(found.slice(0, limit).map((b) => bookJson(b, counts.get(b.id) ?? 0)));
     } catch (e) { return fail(e); }
   } },
 

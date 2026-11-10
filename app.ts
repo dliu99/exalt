@@ -23,6 +23,7 @@ const abs = (path: string) => (path ? `${API}${path}` : '');
 
 const sources: Sources = {
   searchBooks: async ([q]) => (q.trim() === '' ? [] : ((await get(`/search?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]).map(book)),
+  suggestBooks: async ([q]) => (q.trim().length < 2 ? [] : ((await get(`/search?q=${encodeURIComponent(q)}&limit=6`)) as Record<string, unknown>[]).map(book)),
   loadListening: async () => ((await get('/listening')) as Record<string, unknown>[]).map(book),
   loadModels: async () => ((await get('/models')) as { id: string; name: string }[]).map((m) => ({ id: m.id, name: m.name })),
   loadBook: async ([id]) => {
