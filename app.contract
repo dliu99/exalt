@@ -1,7 +1,10 @@
 // Exalt: open audiobooks. Every book is one record (a Google Books volume or Open Library work); anyone can upload
 // an EPUB, PDF or TXT of it and make an audiobook with the voice model they choose, which
 // then sits on that book's page for everyone. app.ts asks server/index.ts for all of it.
+// Listening needs no account; making an audiobook needs Sign in with Apple or Google.
 use EmptyState from "exact:content"
+use getIdentityCapabilities, IdentityCapabilities from "@exact/sign-in"
+use getClientCapabilities, ClientCapabilities from "@exact/passkeys"
 
 routes nav
   home "/"
@@ -56,6 +59,10 @@ shape Reply
   ok: bool
   error: string
 
+shape Account
+  signedIn: bool
+  name: string
+
 fn byline(b: Book): string = b.year > 0 ? `${b.author} · ${b.year}` : b.author
 fn versionsText(n: number): string = n == 0 ? "" : n == 1 ? "1 audiobook" : `${n} audiobooks`
 fn statusText(v: Version): string = v.status == "ready" ? `${v.total} ${v.total == 1 ? "chapter" : "chapters"}` : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : `Voicing ${v.done} of ${v.total}…`
@@ -84,15 +91,22 @@ component App
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
   resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
-  mutation created as shape Reply refreshes detail, listening then afterCreate
+  mutation created as shape Reply refreshes detail, listening, account then afterCreate
+  // The account: the provider's buttons sign in, with a nonce fetched before the press.
+  resource account = currentAccount() as shape Account else empty(signedIn=false, name="")
+  resource identities = getIdentityCapabilities() as shape IdentityCapabilities
+  mutation nonce as shape Reply
+  mutation signedIn as shape Reply refreshes account
+  mutation left as shape Reply refreshes account
+  derive signInError = match signedIn { case some(r) => r.error, case none => "" }
   derive bookId = match stack(nav).filter(e => e.name == "book" or e.name == "create").at(-1) { case some(e) => e.params.id, case none => "" }
   derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }
   derive working = detail.versions.filter(v => v.status == "queued" or v.status == "working").length > 0
   derive ready = detail.versions.filter(v => v.status == "ready")
   derive voices = match first(models.filter(m => m.id == model)) { case some(m) => m.voices, case none => [] }
   derive createError = match created { case some(r) => r.error, case none => "" }
-  derive canCreate = filePath != "" and model != "" and rights and not pending(created)
-  derive createHint = pending(created) ? "Uploading…" : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
+  derive canCreate = account.signedIn and filePath != "" and model != "" and rights and not pending(created)
+  derive createHint = pending(created) ? "Uploading…" : not account.signedIn ? "Sign in to make an audiobook." : filePath == "" ? "Choose a file to read from." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
@@ -108,6 +122,19 @@ component App
   task closing when leaving
     after(200, closeSuggest)
 
+  task prepareIdentity mount
+    after(1, getNonce)
+
+  action getNonce
+    send nonce = identityNonce()
+  action appleSignIn
+    send signedIn = signInWith("apple")
+  action googleSignIn
+    send signedIn = signInWith("google")
+  action signOut
+    send left = signOut()
+    // A sheet still up is for the session that is ending: its answer is dropped.
+    send signedIn = idle()
   action pull
     if working
       refresh detail
@@ -257,6 +284,18 @@ component App
               button press=create buttonStyle="bordered-prominent" aria-label="Make" testId="create-save" disabled=(not canCreate)
                 image "symbol:checkmark"
             list id="create-form" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+              if not account.signedIn
+                section
+                  header
+                    text "Account"
+                  column gap=10 padding-top=8 padding-bottom=8
+                    text "Sign in to make an audiobook. Listening needs no account." color="-exact-secondary-label" testId="sign-in-note"
+                    if identities.providers.apple.active
+                      exact-sign-in-button provider="apple" press=appleSignIn testId="apple-sign-in" width="100%" height=44
+                    if identities.providers.google.active
+                      exact-sign-in-button provider="google" press=googleSignIn testId="google-sign-in" width="100%" height=44
+                    if signInError != ""
+                      text signInError color="-exact-system-red" font="-exact-footnote" testId="sign-in-error"
               section
                 header
                   text "Book file"
@@ -283,8 +322,13 @@ component App
                       for v in voices key=v
                         option v value=v
               section
+                if account.signedIn
+                  row
+                    text `Signed in as ${account.name}` flex=1 min-width=0 testId="account"
+                    button press=signOut testId="sign-out"
+                      text "Sign Out"
                 row
-                  input value=me input=editMe placeholder="Your name (optional)" aria-label="Your name" flex=1 min-width=0 testId="me"
+                  input value=me input=editMe placeholder=(account.name == "" ? "Shown as (optional)" : `Shown as ${account.name}`) aria-label="Shown as" flex=1 min-width=0 testId="me"
                 row
                   text "I may share this" flex=1
                   input type="checkbox" switch checked=rights change=setRights aria-label="I may share this" testId="rights"

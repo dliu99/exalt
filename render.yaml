@@ -25,3 +25,16 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
+      # Accounts (README "Accounts"): the registered sign-in clients, and where the site is.
+      - key: APPLE_SERVICES_ID
+        sync: false
+      - key: GOOGLE_WEB_CLIENT_ID
+        sync: false
+      - key: GOOGLE_IOS_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: WEB_ORIGINS
+        sync: false

@@ -1,12 +1,90 @@
-import type { Answer, Result, Sources } from './app.contract.d.ts';
+import type { Answer, Result, Sources, Store } from './app.contract.d.ts';
+import { credentials } from '@exact/passkeys';
+import { preventSilentAccess } from '@exact/sign-in';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
 export const API: string = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8787';
-export const grants = `net.fetch ${API}\nfs.read app:/tmp/picked`;
+// The sign-in clients registered with Apple and Google (app.json `env`; README "Accounts"); server/config.ts reads the same.
+// The server accepts tokens for these and for the bundle ID, Apple's audience natively.
+const APPLE_SERVICES_ID: string = import.meta.env.APPLE_SERVICES_ID ?? 'app.exalt.audiobooks.web';
+const GOOGLE_WEB_CLIENT_ID: string = import.meta.env.GOOGLE_WEB_CLIENT_ID ?? 'exalt-web.apps.googleusercontent.com';
+const GOOGLE_IOS_CLIENT_ID: string = import.meta.env.GOOGLE_IOS_CLIENT_ID ?? 'exalt-ios.apps.googleusercontent.com';
+const SESSION = 'exalt.session';
+export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`,
+  `auth.apple ${APPLE_SERVICES_ID}`, `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`].join('\n');
 
 type Reply = Result<'createAudiobook'>;
 type Book = Result<'searchBooks'>[number];
+
+// The session the server answered at sign-in: its bearer token and the name to show. The view
+// sees only whether there is one and the name.
+type Session = { token: string; name: string };
+const session = (store: Store): Session | null => {
+  try { return JSON.parse(store.get(SESSION) ?? 'null'); } catch { return null; }
+};
+const bearer = (store: Store): Record<string, string> => {
+  const s = session(store);
+  return s ? { authorization: `Bearer ${s.token}` } : {};
+};
+
+async function post(path: string, body: unknown, headers: Record<string, string> = {}) {
+  const res = await fetch(`${API}${path}`, { method: 'POST', body: JSON.stringify(body), exactTimeout: 15000,
+    headers: { 'content-type': 'application/json', ...headers } });
+  return (await res.json().catch(() => ({}))) as Record<string, any>;
+}
+
+// Sign in with Apple or Google (../exact/docs/recipes/sign-in.md): a single-use nonce from the
+// server, fetched before the press; at the press `get` runs with nothing awaited before it (on
+// the web the button holds the popup for it); the server checks the provider's token and answers
+// a session. Whatever happens, the next nonce is fetched.
+const onWeb = () => /^https?:\/\//.test(authCallback());
+let ready: { nonce: string; client: string } | null = null;
+async function identityNonce() {
+  ready = (await post('/sign-in/nonce', { client: ready?.client, callback: onWeb() ? authCallback() : '' })) as { nonce: string; client: string };
+  return { ok: true, error: '' };
+}
+const PROVIDERS = {
+  apple: { configURL: 'https://appleid.apple.com', clientId: APPLE_SERVICES_ID },
+  google: { configURL: 'https://accounts.google.com/gsi/fedcm.json', clientId: GOOGLE_WEB_CLIENT_ID, apple: { clientId: GOOGLE_IOS_CLIENT_ID } },
+} as const;
+const errorName = (e: unknown) => String((e as { code?: string; name?: string })?.code ?? (e as { name?: string })?.name ?? 'error');
+
+async function signInWith(store: Store, name: 'apple' | 'google') {
+  const asked = ready;
+  if (!asked) return { ok: false, error: 'Sign-in isn’t ready yet. Try again in a moment.' };
+  ready = null;
+  try {
+    let credential;
+    try {
+      credential = await credentials.get({ identity: { mode: 'active', providers: [{
+        ...PROVIDERS[name], params: { nonce: asked.nonce }, ...(onWeb() ? { web: { redirectURI: `${API}/sign-in/return` } } : {}),
+      }] } });
+    } catch (e) {
+      // A cancel, or a request a newer one replaced, shows nothing.
+      const code = errorName(e);
+      return ['NetworkError', 'NotAllowedError', 'AbortError'].includes(code) ? { ok: false, error: '' } : { ok: false, error: 'Sign-in didn’t work. Try again.' };
+    }
+    const { handle: _handle, ...posted } = credential as unknown as Record<string, unknown>;
+    const done = await post('/sign-in/identity', { credential: posted, client: asked.client, nonce: asked.nonce });
+    if (!done.ok) return { ok: false, error: 'Sign-in didn’t work. Try again.' };
+    store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || done.email || 'You') }));
+    return { ok: true, error: '' };
+  } catch {
+    return { ok: false, error: 'Can’t reach the server. Try again.' };
+  } finally {
+    await identityNonce().catch(() => {});
+  }
+}
+
+async function signOut(store: Store) {
+  const headers = bearer(store);
+  store.forget(SESSION);
+  // The next sign-in shows the provider's sheet rather than signing straight back in.
+  await preventSilentAccess().catch(() => {});
+  await post('/sign-out', {}, headers).catch(() => {});
+  return { ok: true, error: '' };
+}
 
 async function get(path: string): Promise<unknown> {
   const res = await fetch(`${API}${path}`, { exactTimeout: 15000 });
@@ -22,6 +100,14 @@ const book = (b: Record<string, unknown>): Book => ({
 const abs = (path: string) => (path ? `${API}${path}` : '');
 
 const sources: Sources = {
+  currentAccount: async (_a, store) => {
+    const s = session(store);
+    return { signedIn: s != null, name: s?.name ?? '' };
+  },
+  identityNonce: () => identityNonce(),
+  signInWith: ([name], store) => signInWith(store, name === 'google' ? 'google' : 'apple'),
+  signOut: (_a, store) => signOut(store),
+  idle: async () => ({ ok: true, error: '' }),
   searchBooks: async ([q]) => (q.trim() === '' ? [] : ((await get(`/search?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]).map(book)),
   suggestBooks: async ([q]) => (q.trim().length < 2 ? [] : ((await get(`/search?q=${encodeURIComponent(q)}&limit=6`)) as Record<string, unknown>[]).map(book)),
   loadListening: async () => ((await get('/listening')) as Record<string, unknown>[]).map(book),
@@ -49,14 +135,19 @@ const sources: Sources = {
     };
   },
   // The picked file's bytes go up as the request body.
-  createAudiobook: async ([bookId, path, name, model, voice, by, rights], _store, storage): Promise<Reply> => {
+  createAudiobook: async ([bookId, path, name, model, voice, by, rights], store, storage): Promise<Reply> => {
     try {
       const bytes = await storage.fs.readFile(path);
       const query = new URLSearchParams({ name, model, voice, by, rights: rights ? '1' : '0' });
       const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: 120000, headers: { 'content-type': 'application/octet-stream' },
+        method: 'POST', body: bytes, exactTimeout: 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
+      // A session the server no longer knows (signed out elsewhere, or expired): sign in again.
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return { ok: false, error: 'Sign in again to make an audiobook.' };
+      }
       return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
     } catch (e) {
       if ((e as { code?: string }).code === 'bake') throw e;

@@ -2,7 +2,8 @@
 // `bun server/index.ts` for development; `--offline` (what tests run) answers search from a
 // fixture and voices with silence, so nothing reaches the network.
 import { join as pathJoin, normalize } from 'node:path';
-import { API } from '../app.ts';
+import { API, CLIENTS } from './config.ts';
+import { auth, type Provider } from './auth.ts';
 import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
 import { booksWithAudio, db, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
 import { AUDIO_DIR, enqueue } from './jobs.ts';
@@ -11,11 +12,27 @@ import { listModels } from './tts.ts';
 
 const OFFLINE = process.argv.includes('--offline');
 consolidate();
-const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range', 'access-control-allow-methods': 'GET, POST', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
 const preflight = () => new Response(null, { status: 204, headers: CORS });
 const fail = (e: unknown, status = 502) => send({ error: String((e as Error).message ?? e) }, status);
+const json = (req: Request) => req.json().catch(() => ({})) as Promise<Record<string, any>>;
 
+// Accounts (auth.ts). Under --offline with SIGN_IN_TEST_KEYS, exact's fixture provider stands in
+// for Apple and Google, so tests and drives sign in with no network.
+const testKeys = OFFLINE ? process.env.SIGN_IN_TEST_KEYS : undefined;
+const idp = testKeys ? await import(pathJoin(process.env.EXACT2 ?? pathJoin(import.meta.dir, '../../exact'), 'packages/sign-in/test/idp.mjs')) : null;
+const accounts = auth({
+  audiences: { apple: [CLIENTS.appId, CLIENTS.appleWeb], google: [CLIENTS.googleWeb, CLIENTS.googleIos] },
+  publicUrl: process.env.PUBLIC_URL ?? API,
+  webOrigins: (process.env.WEB_ORIGINS ?? '').split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean),
+  googleSecret: process.env.GOOGLE_CLIENT_SECRET,
+  ...(idp ? { keys: async (_p: Provider) => (await idp.jwks(testKeys)).keys, exchange: (code: string) => idp.exchange(testKeys, code) } : {}),
+});
+const signInRequired = () => send({ error: 'Sign in to make an audiobook.' }, 401);
+
+const back = (r: { status: number; location?: string; body?: string }) =>
+  r.location ? new Response(null, { status: r.status, headers: { location: r.location } }) : new Response(r.body ?? '', { status: r.status });
 const bookJson = (b: BookRow, versions: number) => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, description: b.description, versions });
 const versionJson = (g: GenerationRow) => {
   const first = tracksOf(g.id)[0];
@@ -29,6 +46,24 @@ const listen = new URL(API);
 const hostname = process.env.HOST ?? listen.hostname, port = Number(process.env.PORT ?? listen.port);
 Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
   '/health': () => new Response('ok'),
+
+  '/sign-in/nonce': { OPTIONS: preflight, POST: async (req) => send(accounts.nonce(await json(req))) },
+  '/sign-in/identity': { OPTIONS: preflight, POST: async (req) => {
+    try { return send(await accounts.identity(await json(req))); } catch (e) { return fail(e); }
+  } },
+  // The web's return: Google redirects here (GET), Apple posts a form (POST).
+  '/sign-in/return': {
+    GET: async (req) => back(await accounts.back('GET', Object.fromEntries(new URL(req.url).searchParams))),
+    POST: async (req) => {
+      const form = await req.formData().catch(() => null);
+      return back(await accounts.back('POST', Object.fromEntries([...(form?.entries() ?? [])].map(([k, v]) => [k, String(v)]))));
+    },
+  },
+  '/me': { OPTIONS: preflight, GET: (req) => {
+    const me = accounts.user(req);
+    return me ? send({ name: me.name, email: me.email }) : send({ error: 'Not signed in.' }, 401);
+  } },
+  '/sign-out': { OPTIONS: preflight, POST: (req) => { accounts.signOut(req); return send({ ok: true }); } },
 
   '/search': { OPTIONS: preflight, GET: async (req) => {
     const params = new URL(req.url).searchParams;
@@ -62,16 +97,19 @@ Bun.serve({ hostname, port, maxRequestBodySize: 200 * 1024 * 1024, routes: {
 
   // The upload is the request body; what to make of it is in the query.
   '/books/:id/generations': { OPTIONS: preflight, POST: async (req) => {
+    const me = accounts.user(req);
+    if (!me) return signInRequired();
     const q = new URL(req.url).searchParams;
-    const name = q.get('name') ?? '', model = q.get('model') ?? '', voice = q.get('voice') ?? '', by = q.get('by')?.trim() || 'Anonymous';
+    const name = q.get('name') ?? '', model = q.get('model') ?? '', voice = q.get('voice') ?? '';
+    const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
     if (q.get('rights') !== '1') return send({ error: 'Confirm you have the right to share an audiobook of this file.' }, 400);
     if (!model) return send({ error: 'Choose a voice model.' }, 400);
     const book = await ensureBook(req.params.id, OFFLINE).catch(() => null);
     if (!book) return send({ error: 'No such book.' }, 404);
     let chapters;
     try { chapters = await parseBook(name, new Uint8Array(await req.arrayBuffer())); } catch (e) { return fail(e, 400); }
-    const { lastInsertRowid } = db.query(`INSERT INTO generations (book_id, made_by, model, voice, source_name, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'queued', ?)`).run(book.id, by.slice(0, 40), model, voice, name, Date.now());
+    const { lastInsertRowid } = db.query(`INSERT INTO generations (book_id, user_id, made_by, model, voice, source_name, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)`).run(book.id, me.id, by.slice(0, 40), model, voice, name, Date.now());
     enqueue({ id: Number(lastInsertRowid), model, voice, chapters });
     return send({ ok: true, id: String(lastInsertRowid) }, 201);
   } },
