@@ -100,7 +100,7 @@ shape Mine
   model: string
   voice: string
 
-// A voice from Fish Audio's library, and the one the listener prefers.
+// A voice from Fish Audio's library (read through OpenRouter's Fish models), and the listener's choice.
 shape Voice
   id: string
   title: string
@@ -217,7 +217,7 @@ component App
   state duration = 0
   state rate = 1
   state resumeTime = 0
-  derive fishModel = model.startsWith("fish/")
+  derive fishModel = model.startsWith("fish-audio/")
   derive mineWorking = mine.filter(m => m.status == "queued" or m.status == "working").length > 0
   derive playerCover = wide ? min(240, round(viewport.height * 0.28)) : min(220, round(viewport.width * 0.56))
   // The account: the provider's buttons sign in, with a nonce fetched before the press.
@@ -443,7 +443,7 @@ component App
     fastSeek("player-audio", min(max(0, duration - 1), now + 30))
   action cycleRate
     rate = nextRate(rate)
-  // Voices: search Fish Audio's library, hear a sample, choose one.
+  // Voices: browse or search Fish Audio's community library, hear a sample, choose one.
   action editVoiceQuery(v: string)
     voiceQuery = v
   action takeVoiceQuery
@@ -633,15 +633,15 @@ component App
                         for b in listening key=b.id
                           BookCard(book=b, w=(wide ? 140 : 96))
             TopBar(active="explore", wide=wide)
-        // Voices: Fish Audio's licensed voices; hear one, choose one.
+        // Voices: Fish Audio's licensed voices to start, and its whole community library by search.
         if e.name == "voices"
           column navigationKey=`${e.id}` navigationScroll="voices-scroll" position="absolute" inset=0 background-color="#eceef2" testId="voices"
             scroll id="voices-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "88px 20px 72px") gap=32
                 column gap=12
                   text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f"
-                  text "The voice you choose reads the audiobooks you make. These are Fish Audio’s licensed voices." font-family="Jost" font-size=16 line-height=1.5 color="#4a4f5c" max-width=520
-                input type="search" value=voiceQuery input=editVoiceQuery placeholder="Search voices" aria-label="Search Voices" testId="voice-search"
+                  text "The voice you choose reads the audiobooks you make. Start with Fish Audio’s licensed narrators, or search its community library." font-family="Jost" font-size=16 line-height=1.5 color="#4a4f5c" max-width=520
+                input type="search" value=voiceQuery input=editVoiceQuery placeholder="Search community voices" aria-label="Search Voices" testId="voice-search"
                   width="100%" max-width=480 box-sizing="border-box" appearance="none" font-family="Jost" font-weight=300 font-size=20 color="#14171f"
                   background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="8px 0" outline="none"
                 if pending(voiceList) and voiceList.length == 0
