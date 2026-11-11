@@ -5,14 +5,14 @@
       "name": "api",
       "runtimeExecutable": "bun",
       "runtimeArgs": ["--env-file=../../../.env", "server/index.ts"],
-      "env": { "API_BASE_URL": "http://127.0.0.1:9123" },
-      "port": 9123
+      "env": { "API_BASE_URL": "http://127.0.0.1:8787", "PUBLIC_URL": "http://127.0.0.1:8787" },
+      "port": 8787
     },
     {
       "name": "web",
       "runtimeExecutable": "bun",
-      "runtimeArgs": ["exact.mjs", "web", "--port", "3000"],
-      "env": { "EXACT2": "/Users/devin/projects/exact", "API_BASE_URL": "http://127.0.0.1:9123" },
+      "runtimeArgs": ["--env-file=../../../.env", "exact.mjs", "web", "--port", "3000"],
+      "env": { "EXACT2": "/Users/devin/projects/exact", "API_BASE_URL": "http://127.0.0.1:8787" },
       "port": 3000
     }
   ]
