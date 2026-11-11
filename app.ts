@@ -333,7 +333,8 @@ const sources: Sources = {
       book: book(body.book),
       versions: body.versions.map((v) => ({
         id: String(v.id), by: String(v.by), model: String(v.model), voice: String(v.voice), status: String(v.status),
-        done: Number(v.done), total: Number(v.total), error: String(v.error), sample: abs(String(v.sample)), voiceName: String(v.voiceName ?? ''),
+        done: Number(v.done) || 0, total: Number(v.total) || 0, active: Number(v.active) || 0, error: String(v.error),
+        sample: abs(String(v.sample)), voiceName: String(v.voiceName ?? ''),
       })),
     };
   },
@@ -341,16 +342,48 @@ const sources: Sources = {
     if (!id) return { available: false, files: [] };
     return await get(`/books/${encodeURIComponent(id)}/sources`, 30000) as Result<'loadBookSources'>;
   },
-  loadAudiobook: async ([id]) => {
-    if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', tracks: [] };
-    const g = (await get(`/generations/${encodeURIComponent(id)}`)) as {
-      id: string; by: string; model: string; book: { id: string; title: string; author: string; cover: string };
-      tracks: { idx: number; title: string; src: string }[];
+  // A version and its chapters. Asked with the session, the server also says how many chapters this
+  // listener has narrating (of how many at once) and whether they made it.
+  loadAudiobook: async ([id], store) => {
+    if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', status: '', error: '', chapters: [], mine: 0, limit: 0, owner: false };
+    const res = await fetch(`${API}/generations/${encodeURIComponent(id)}`, { exactTimeout: 15000, headers: bearer(store) });
+    const g = (await res.json().catch(() => ({}))) as {
+      id: string; by: string; model: string; status: string; error: string; book: { id: string; title: string; author: string; cover: string };
+      chapters: { idx: number; title: string; src: string; status: string; progress: number; error: string }[];
+      mine?: number; limit?: number; owner?: boolean;
     };
+    if (!res.ok) throw new Error(g.error ?? `The server answered ${res.status}.`);
     return {
       id: String(g.id), book: String(g.book.id), title: g.book.title, author: g.book.author, cover: g.book.cover, by: g.by, model: g.model,
-      tracks: g.tracks.map((t) => ({ idx: t.idx, title: t.title, src: abs(t.src) })),
+      status: String(g.status), error: String(g.error ?? ''), mine: Number(g.mine) || 0, limit: Number(g.limit) || 0, owner: g.owner === true,
+      chapters: g.chapters.map((c) => ({ idx: c.idx, title: c.title, src: abs(c.src), status: c.status, progress: Number(c.progress) || 0, error: String(c.error ?? '') })),
     };
+  },
+  // Narrate one chapter: anyone signed in may ask, a few at a time.
+  generateChapter: async ([gen, idx], store): Promise<Reply> => {
+    try {
+      const res = await fetch(`${API}/generations/${encodeURIComponent(gen)}/chapters/${idx}`, { method: 'POST', exactTimeout: 15000, headers: bearer(store) });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return { ok: false, error: 'Sign in again to narrate a chapter.' };
+      }
+      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
+    } catch (e) {
+      if ((e as { code?: string }).code === 'bake') throw e;
+      return { ok: false, error: 'Can’t reach the server. Try again.' };
+    }
+  },
+  // Delete a version this listener made, its audio with it.
+  deleteAudiobook: async ([gen], store): Promise<Reply> => {
+    try {
+      const res = await fetch(`${API}/generations/${encodeURIComponent(gen)}`, { method: 'DELETE', exactTimeout: 15000, headers: bearer(store) });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
+    } catch (e) {
+      if ((e as { code?: string }).code === 'bake') throw e;
+      return { ok: false, error: 'Can’t reach the server. Try again.' };
+    }
   },
   // The picked file's bytes go up as the request body.
   createAudiobook: async ([bookId, path, name, sourceId, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {

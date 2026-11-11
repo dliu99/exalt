@@ -47,22 +47,26 @@ test "search finds a book and opens its page"
   expect tree has "goodreads"
   expect tree missing "book-description"
 
-test "making an audiobook waits for a file and consent"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "harbour"
-  type "search" key "Enter"
+test "Import is the form for anyone: the book's searches, its file, a voice and consent"
+  at "/book/OL1W/import"
   clock data
-  tap "book-OL1W"
-  clock data
-  expect text "book-description" == "A test book about a harbour."
-  tap "make"
-  clock data
-  expect state model == "exalt/silence"
+  expect tree has "create"
+  expect tree has "find-libgen"
+  expect tree has "find-zlibrary"
+  expect tree has "find-web"
+  expect tree has "choose-file"
+  expect tree has "model"
+  expect tree has "rights"
+  expect tree missing "account"
   expect state rights == false
   expect state canCreate == false
+  expect disabled "create-save"
+  tap "create-cancel"
+  clock data
+  expect text "book-title" == "A Quiet Harbour"
 
-test "making an audiobook asks for an account, with Google's button"
+test "signed out, Generate opens the sheet to log in or sign up, and stays on the book"
+  size 390x844
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -70,20 +74,11 @@ test "making an audiobook asks for an account, with Google's button"
   clock data
   tap "book-OL1W"
   clock data
+  expect state pendingAuth == ""
   tap "make"
-  clock data
-  expect tree has "sign-in-note"
-  expect tree missing "apple-sign-in"
-  expect tree has "google-sign-in"
-  expect text "sign-in-note" == "Sign in to make an audiobook. Listening needs no account."
-  expect tree missing "account"
-  expect tree missing "sign-out"
-  expect tree missing "model"
-  expect tree missing "rights"
-  expect tree missing "create-save"
-  clock settle
-  tap "create-cancel"
-  clock settle
+  expect tree has "account-site-google"
+  expect state pendingAuth == "import"
+  expect tree missing "create"
   expect text "book-title" == "A Quiet Harbour"
 
 test "typing suggests books under the field, and one opens its page"
@@ -139,7 +134,8 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
   expect tree has "home"
 
-test "signed out, making an audiobook shows only the sign-in, not the form"
+test "closing the sheet without signing in carries nothing on"
+  size 390x844
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -148,12 +144,11 @@ test "signed out, making an audiobook shows only the sign-in, not the form"
   tap "book-OL1W"
   clock data
   tap "make"
-  clock data
-  expect tree has "create-signed-out"
-  expect tree missing "book-source"
-  expect tree missing "choose-file"
-  expect tree missing "me"
-  expect tree missing "create-hint"
+  expect state pendingAuth == "import"
+  back
+  clock settle
+  expect state pendingAuth == ""
+  expect text "book-title" == "A Quiet Harbour"
 
 test "a search settles to its books, and the field clears"
   tap "enter"
@@ -169,3 +164,137 @@ test "a search settles to its books, and the field clears"
   expect state query == ""
   expect state asked == ""
   expect tree missing "book-OL2W"
+
+// On a phone, a book's page turns the dock into its own bar: back, and Play or Generate.
+test "a book with no audiobook shows back and Generate in the dock, and back returns"
+  size 390x844
+  tap "enter"
+  tap "nav-explore"
+  type "search" "rivers"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL2W"
+  clock data
+  expect tree has "book-bar"
+  expect tree has "dock-back"
+  expect tree has "make"
+  expect tree missing "listen"
+  expect tree missing "nav-home"
+  expect tree missing "book-back"
+  tap "dock-back"
+  clock settle
+  expect tree has "explore"
+  expect tree has "nav-home"
+  expect tree missing "book-bar"
+
+test "a version lists its chapters: the first narrated, the others waiting for Generate"
+  request POST "/books/OL1W/generations?source=lg-00000000000000000000000000000001&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  expect text "status-1" == "ada · 1 of 3 chapters narrated"
+  tap "version-1"
+  clock data
+  expect text "now-playing" == "Chapter One: The Harbour"
+  expect tree has "toggle"
+  expect tree missing "generate-0"
+  expect tree has "generate-1"
+  expect tree has "generate-2"
+  expect tree missing "delete"
+  expect tree missing "in-progress"
+
+test "signed out, a chapter's Generate opens the sheet"
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  tap "version-1"
+  clock data
+  expect state pendingAuth == ""
+  tap "generate-2"
+  expect tree has "account-site-google"
+  expect state pendingAuth == "chapter"
+  expect state pendingChapter == 2
+
+test "the player's speed, pause, position and skips"
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  tap "version-1"
+  clock data
+  expect state duration == 1
+  expect state rate == 1
+  tap "rate"
+  expect state rate == 1.25
+  expect text "rate" == "1.25×"
+  tap "rate"
+  tap "rate"
+  expect state rate == 2
+  tap "rate"
+  expect state rate == 0.75
+  expect state held == false
+  tap "toggle"
+  expect state held == true
+  type "scrub" "1"
+  expect state now == 1
+  expect text "elapsed" == "0:01"
+  tap "back15"
+  expect state now == 0
+  expect text "elapsed" == "0:00"
+  // +30 never runs past the chapter: it stops a second short of its end.
+  tap "fwd30"
+  expect state now == 0
+
+test "at a chapter that isn't narrated the player stops and offers Generate, and plays it once someone has"
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  tap "version-1"
+  clock data
+  tap "audio" mediasession "nexttrack"
+  expect text "now-playing" == "Chapter Two: The River"
+  expect state held == true
+  expect tree has "not-narrated"
+  expect tree has "generate-current"
+  expect tree missing "audio"
+  request POST "/generations/1/chapters/1" as grace
+  clock +1500 real
+  clock +3000
+  clock data
+  expect tree missing "not-narrated"
+  expect tree has "audio"
+  expect tree has "toggle"
+  expect tree missing "generate-1"
+
+test "once a chapter is narrated the dock plays the book"
+  size 390x844
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  expect tree has "listen"
+  expect tree missing "make"
+  expect tree has "make-another"
+  tap "listen"
+  clock data
+  expect tree has "player"
+  expect text "now-playing" == "Chapter One: The Harbour"
