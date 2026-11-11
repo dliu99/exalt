@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { zipSync, strToU8 } from 'fflate';
-import { parseBook } from './parse.ts';
+import { parseBook, restoreLigatures } from './parse.ts';
 import { MAX_TEXT_CHARS } from './limits.ts';
 
 test('EPUB extraction rejects oversized entries before expanding them', async () => {
@@ -173,18 +173,25 @@ describe('EPUB chapters', () => {
 });
 
 // A PDF of one page per string (lines split at \n), with an outline of bookmarks to pages (0-based).
+// With `glyphIds`, text is set in a composite font whose ToUnicode map covers only ASCII, as calibre's
+// PDFs are: each character is drawn as the glyph id of its code point, so pdf.js reads any character
+// beyond ASCII back as that code point. (Named Helvetica, pdf.js would read the ids as Arial's glyphs.)
 type Mark = { title: string; page: number; kids?: Mark[] };
-function pdf(pages: string[], outline: Mark[] = []): Uint8Array {
+function pdf(pages: string[], outline: Mark[] = [], { glyphIds = false } = {}): Uint8Array {
   const esc = (s: string) => s.replace(/[\\()]/g, '\\$&');
-  const objs: string[] = [], page = (i: number) => 4 + 2 * i, root = page(pages.length);
+  const objs: string[] = [], page = (i: number) => 6 + 2 * i, root = page(pages.length);
   let next = root;
   objs[1] = `<< /Type /Catalog /Pages 2 0 R${outline.length ? ` /Outlines ${root} 0 R` : ''} >>`;
   objs[2] = `<< /Type /Pages /Kids [${pages.map((_, i) => `${page(i)} 0 R`).join(' ')}] /Count ${pages.length} >>`;
-  objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  objs[3] = glyphIds ? '<< /Type /Font /Subtype /Type0 /BaseFont /CharisSIL /Encoding /Identity-H /DescendantFonts [4 0 R] /ToUnicode 5 0 R >>' : '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  objs[4] = '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CharisSIL /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>';
+  const cmap = '/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /ASCII def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfrange <0020> <007E> <0020> endbfrange endcmap CMapName currentdict /CMap defineresource pop end end';
+  objs[5] = `<< /Length ${cmap.length} >>\nstream\n${cmap}\nendstream`;
+  const show = (l: string) => (glyphIds ? `<${[...l].map((c) => c.codePointAt(0)!.toString(16).padStart(4, '0')).join('')}>` : `(${esc(l)})`);
   pages.forEach((text, i) => {
     // pdf.js leaves out text drawn past the page edge, so long lines wrap at 8 words.
     const lines = text.split('\n').flatMap((l) => l.split(' ').reduce<string[][]>((out, w) => (out.at(-1)!.length < 8 ? out.at(-1)!.push(w) : out.push([w]), out), [[]]).map((ws) => ws.join(' ')));
-    const stream = `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `(${esc(l)}) Tj T*`).join(' ')} ET`;
+    const stream = `BT /F1 12 Tf 14 TL 72 720 Td ${lines.map((l) => `${show(l)} Tj T*`).join(' ')} ET`;
     objs[page(i)] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${page(i) + 1} 0 R >>`;
     objs[page(i) + 1] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
   });
@@ -238,5 +245,34 @@ describe('PDF chapters', () => {
     const chapters = await parseBook('harbour.pdf', pdf(Array.from({ length: 12 }, (_, i) => line(`page${i + 1}`))));
     expect(chapters.map((c) => c.title)).toEqual(['Pages 1–10', 'Pages 11–12']);
     expect(chapters[1].text).toBe(`${line('page11')} ${line('page12')}`);
+  });
+});
+
+describe('ligatures', () => {
+  // As in a calibre PDF set in Charis SIL, whose ligature glyph ids read as ʃ (ff), ɹ (fi), ɻ (fl),
+  // ɽ (ffi) and ʀ (ffl). Plain spellings at sentence starts vouch for the first three; ffi and ffl
+  // follow Charis SIL. The IPA at the end isn't inside a Latin word, so it stays.
+  const plain = 'First light. Find five. Fine. Finally. Flat floor. Flight. Off. Effort. Coffee.';
+  const restored = 'At first light she had to find the five boats in fine rain, and finally the flat floor of the far-flung flight deck, off and on, with effort and coffee, past the harbour office and its shuffled cards. The sound /ɹ/ is written ˈɹʌn here.';
+  const glyphs = 'At ɹrst light she had to ɹnd the ɹve boats in ɹne rain, and ɹnally the ɻat ɻoor of the far-ɻung ɻight deck, oʃ and on, with eʃort and coʃee, past the harbour oɽce and its shuʀed cards. The sound /ɹ/ is written ˈɹʌn here.';
+
+  test('a PDF font that leaves ligatures out of its ToUnicode map is read with them restored', async () => {
+    const chapters = await parseBook('harbour.pdf', pdf([`${plain}\n${glyphs}`], [], { glyphIds: true }));
+    expect(chapters.map((c) => c.text)).toEqual([`${plain} ${restored}`]);
+  });
+
+  test('stray letters are only read as ligatures when the book spells the restored words', () => {
+    expect(restoreLigatures([plain, glyphs])).toEqual([plain, restored]);
+    // IPA in Latin-looking words, with plain words a ligature could make from some of them ("flip",
+    // "stop"), isn't evidence enough.
+    const ipa = ['The vowels: /ʃip/, /ʃop/, /ʃut/, /ɹed/, /ɹat/ and /ɹun/. Flip the card, then stop.'];
+    expect(restoreLigatures(ipa)).toEqual(ipa);
+  });
+
+  test('Unicode ligatures and the long s are read as their letters', async () => {
+    const text = `Chapter 1: The ﬁrst Floor\n${line('harbour')} ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ ſ\nChapter 2: Aﬂoat\n${line('river')}`;
+    const chapters = await parseBook('harbour.txt', new TextEncoder().encode(text));
+    expect(chapters.map((c) => c.title)).toEqual(['Chapter 1: The first Floor', 'Chapter 2: Afloat']);
+    expect(chapters[0].text).toBe(`${line('harbour')} ff fi fl ffi ffl st st s`);
   });
 });

@@ -2,7 +2,8 @@
 // else the EPUB 2 NCX) and falls back to the spine; PDF follows its outline and falls back to
 // 10-page parts; TXT splits at "Chapter" headings. Cover, title, copyright, contents, index and
 // similar pages are left out; forewords, prefaces, introductions, prologues and epilogues stay.
-// Anything without chapters is cut into parts of about PART_WORDS words.
+// Anything without chapters is cut into parts of about PART_WORDS words. Ligatures are read as their
+// letters, including PDF ligature glyphs that pdf.js reads as stray letters.
 import { MAX_BOOK_BYTES, MAX_TEXT_CHARS } from './limits.ts';
 import { strFromU8, unzipSync } from 'fflate';
 
@@ -17,13 +18,16 @@ export async function parseBook(name: string, bytes: Uint8Array): Promise<Chapte
   const ext = name.toLowerCase().split('.').pop();
   const chapters = ext === 'epub' ? parseEpub(bytes) : ext === 'pdf' ? await parsePdf(bytes) : ext === 'txt' ? parseTxt(new TextDecoder().decode(bytes)) : null;
   if (!chapters) throw new Error('Upload an EPUB, PDF or TXT file.');
-  const kept = chapters.map((c) => ({ title: c.title, text: tidy(c.text) })).filter((c) => c.text.split(' ').length >= 20);
+  const kept = chapters.map((c) => ({ title: unligate(c.title), text: tidy(unligate(c.text)) })).filter((c) => c.text.split(' ').length >= 20);
   if (kept.length === 0) throw new Error('No readable text was found in this file.');
   if (kept.reduce((n, c) => n + c.text.length + c.title.length, 0) > MAX_TEXT_CHARS) throw new Error(`This book exceeds the ${MAX_TEXT_CHARS.toLocaleString('en-US')}-character narration limit.`);
   return kept;
 }
 
 const tidy = (s: string) => s.replace(/\s+/g, ' ').trim();
+// Typographic ligatures (U+FB00–FB06) as their letters, and the long s as s, so TTS reads words.
+const LIGATURES: Record<string, string> = { '\uFB00': 'ff', '\uFB01': 'fi', '\uFB02': 'fl', '\uFB03': 'ffi', '\uFB04': 'ffl', '\uFB05': 'st', '\uFB06': 'st', '\u017F': 's' };
+const unligate = (s: string) => s.replace(/[\uFB00-\uFB06\u017F]/g, (c) => LIGATURES[c]);
 const words = (s: string) => s.match(/\S+/g)?.length ?? 0;
 // A title's words, for comparing titles and headings regardless of case, spacing and punctuation.
 const norm = (s: string) => s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -324,12 +328,51 @@ async function parsePdf(bytes: Uint8Array): Promise<Chapter[]> {
   const { extractText, getDocumentProxy } = await import('unpdf');
   const pdf = await getDocumentProxy(bytes);
   try {
-    const pages = (await extractText(pdf, { mergePages: false })).text as string[];
+    const pages = restoreLigatures((await extractText(pdf, { mergePages: false })).text as string[]);
     const chapters = await byOutline(pdf, pages);
     return chapters && chapters.length >= 2 ? chapters : byPages(pages);
   } finally {
     await pdf.loadingTask.destroy();
   }
+}
+
+// pdf.js reads a character code missing from a font's ToUnicode map as the character itself. In a
+// composite font that code is the glyph id, so a PDF that leaves its ligature glyphs out of the map
+// (calibre's do) comes out with stray letters for them: Charis SIL gives "ɹrst" for "first" and "oʃ"
+// for "off". pdf.js has no option to map them otherwise, and the ids depend on the font, so the book
+// says which ligature each stray letter stands for: the one that turns the most of the Latin words
+// it's in into words the book also spells in plain letters ("First" at a sentence start vouches for
+// "ɹrst"). IPA and other real uses of these letters don't spell the book's words, so they stay.
+const LIGATURE_LETTERS = ['ff', 'fi', 'fl', 'ffi', 'ffl', 'ft', 'fj', 'st', 'ct', 'Th'];
+// Charis SIL's ligature glyph ids, for a ligature too rare to vouch for itself in a book that has
+// vouched for two others.
+const CHARIS: Record<string, string> = { 'ʃ': 'ff', 'ɹ': 'fi', 'ɻ': 'fl', 'ɽ': 'ffi', 'ʀ': 'ffl' };
+const LATIN = 'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u017F';
+// A letter beyond Latin-1 and Latin Extended-A, or a private-use character.
+const STRAY = new RegExp(`[^\\P{L}${LATIN}]|\\p{Co}`, 'gu');
+const MIXED_WORD = new RegExp(`(?:[${LATIN}]|${STRAY.source})+`, 'gu');
+
+export function restoreLigatures(pages: string[]): string[] {
+  const plain = new Set<string>(), seen = new Map<string, Set<string>>();
+  for (const page of pages) for (const [w] of page.matchAll(MIXED_WORD)) {
+    const strays = new Set(w.match(STRAY));
+    if (strays.size === 0) plain.add(w.toLowerCase());
+    else if (strays.size === 1 && /[A-Za-z]/.test(w)) { const [c] = strays; seen.set(c, (seen.get(c) ?? new Set()).add(w)); }
+  }
+  // A stray letter's ligature must make at least three of its words, a tenth of them, and twice as
+  // many as the next best.
+  const map = new Map<string, string>();
+  for (const [c, ws] of seen) {
+    const [[best, n], [, next]] = LIGATURE_LETTERS.map((l) => [l, [...ws].filter((w) => plain.has(w.split(c).join(l).toLowerCase())).length] as const).sort((a, b) => b[1] - a[1]);
+    if (n >= 3 && n >= ws.size / 10 && n >= 2 * next) map.set(c, best);
+  }
+  if (Object.entries(CHARIS).filter(([c, l]) => map.get(c) === l).length >= 2) for (const [c, l] of Object.entries(CHARIS)) if (!map.has(c)) map.set(c, l);
+  if (map.size === 0) return pages;
+  // Only inside words with Latin letters, and only words whose every stray letter is a ligature.
+  return pages.map((p) => p.replace(MIXED_WORD, (w) => {
+    const strays = w.match(STRAY);
+    return strays && /[A-Za-z]/.test(w) && strays.every((c) => map.has(c)) ? w.replace(STRAY, (c) => map.get(c)!) : w;
+  }));
 }
 
 function byPages(pages: string[]): Chapter[] {
@@ -364,7 +407,7 @@ async function byOutline(pdf: Pdf, pages: string[]): Promise<Chapter[] | null> {
     } catch { return; }
   };
   const place = (nodes: OutlineNode[], depth: number): Promise<Entry<number>[]> => Promise.all(nodes.map(async (n) => (
-    { title: tidy(n.title ?? ''), at: await pageOf(n.dest), children: depth < 3 ? await place(n.items ?? [], depth + 1) : [] })));
+    { title: tidy(unligate(n.title ?? '')), at: await pageOf(n.dest), children: depth < 3 ? await place(n.items ?? [], depth + 1) : [] })));
   const list = chapterLevel(await place(outline, 0)).filter((e): e is Entry<number> & { at: number } => e.at !== undefined).sort((a, b) => a.at - b.at);
   if (new Set(list.map((e) => e.at)).size < 2) return null;
 
