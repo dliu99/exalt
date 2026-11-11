@@ -5,12 +5,15 @@
     "": {
       "name": "exalt-app",
       "dependencies": {
+        "@exact/oauth": "file:../exact/packages/oauth",
         "@exact/passkeys": "file:../exact/packages/passkeys",
         "@exact/sign-in": "file:../exact/packages/sign-in",
       },
     },
   },
   "packages": {
+    "@exact/oauth": ["@exact/oauth@file:../exact/packages/oauth", {}],
+
     "@exact/passkeys": ["@exact/passkeys@file:../exact/packages/passkeys", {}],
 
     "@exact/sign-in": ["@exact/sign-in@file:../exact/packages/sign-in", {}],

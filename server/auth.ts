@@ -7,6 +7,10 @@
 //   POST /sign-in/return    Apple's form_post (code, id_token, state, user?), on the web
 //                           → 303 to the page's /.exact/auth/callback with `state` and `relay=<handle>`
 //   POST /sign-in/identity  {credential, client, nonce} → {ok, token, name, email} | {ok: false, error}
+//                           The iPhone app's Apple sign-in uses this route too, in the system sheet:
+//                           its nonce names the app's own callback (appCallbacks), where the 303 goes.
+//   POST /sign-in/google    bearer: Google's access token → the same; the iPhone app, which signs
+//                           in through @exact/oauth because exact's native Google identity is unbuilt
 //   GET  /me                bearer                       → {name, email} | 401
 //   POST /sign-out          bearer                       → {ok}
 //
@@ -58,10 +62,14 @@ export type AuthOptions = {
   publicUrl: string;
   /** Page origins the return route may send a browser back to; loopback ones are always allowed. */
   webOrigins: string[];
+  /** The app's own callbacks (its URL scheme) the return route may send the iPhone app's sign-in sheet back to. */
+  appCallbacks?: string[];
   /** Google's web client secret, for exchanging the web redirect's code. */
   googleSecret?: string;
   /** The providers' signing keys; their published keys by default. */
   keys?: (provider: Provider) => Promise<Jwk[]>;
+  /** What Google says of an access token: its client, the person and their name; Google's tokeninfo and userinfo by default. */
+  googleAccess?: (accessToken: string) => Promise<GoogleAccess | null>;
   /** Google's code for its ID token; Google's token endpoint by default. */
   exchange?: (code: string) => Promise<string | null>;
   now?: () => number;
@@ -91,6 +99,15 @@ export function auth(o: AuthOptions) {
     return res.ok ? String(((await res.json()) as { id_token?: string }).id_token ?? '') || null : null;
   });
 
+  const googleAccess = o.googleAccess ?? (async (accessToken: string): Promise<GoogleAccess | null> => {
+    const info = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+    if (!info.ok) return null;
+    const t = (await info.json()) as { aud?: string; azp?: string; sub?: string; email?: string; expires_in?: string };
+    const me = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${accessToken}` } })
+      .then((r) => (r.ok ? r.json() : {})).catch(() => ({})) as { name?: string; email?: string };
+    return { aud: String(t.aud ?? t.azp ?? ''), sub: String(t.sub ?? ''), email: String(t.email ?? me.email ?? ''), name: String(me.name ?? '') };
+  });
+
   const sweep = () => {
     const t = now();
     for (const [k, v] of nonces) if (v.expires < t) nonces.delete(k);
@@ -99,6 +116,7 @@ export function auth(o: AuthOptions) {
 
   /** Where a page's sign-in comes back to: its own callback, if its origin is one we serve. */
   const allowedCallback = (url: string) => {
+    if (o.appCallbacks?.includes(url)) return url;
     try {
       const u = new URL(url);
       return u.pathname === '/.exact/auth/callback' && (LOOPBACK.test(u.origin) || o.webOrigins.includes(u.origin)) ? u.toString() : '';
@@ -207,6 +225,18 @@ export function auth(o: AuthOptions) {
       return { ok: true, token: startSession(me), name: me.name, email: me.email };
     },
 
+    /** Google's access token from the iPhone app: Google says which client it was issued to and to whom. */
+    async google(req: Request): Promise<Result> {
+      const accessToken = req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1];
+      if (!accessToken) return { ok: false, error: 'no token' };
+      const got = await googleAccess(accessToken);
+      if (!got) return { ok: false, error: 'token' };
+      if (!o.audiences.google.includes(got.aud)) return { ok: false, error: 'aud' };
+      if (!got.sub) return { ok: false, error: 'sub' };
+      const me = account('google', { sub: got.sub, email: got.email, name: got.name }, null);
+      return { ok: true, token: startSession(me), name: me.name, email: me.email };
+    },
+
     /** The account a request's bearer token belongs to. */
     user(req: Request): User | null {
       const token = req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1];
@@ -222,5 +252,6 @@ export function auth(o: AuthOptions) {
   };
 }
 
+type GoogleAccess = { aud: string; sub: string; email: string; name: string };
 type AppleUser = { email?: string; name?: { firstName?: string; lastName?: string } };
 type Credential = { configURL?: string; token?: unknown };

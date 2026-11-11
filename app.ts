@@ -1,6 +1,7 @@
 import type { Answer, Result, Sources, Store } from './app.contract.d.ts';
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
+import { oauth } from '@exact/oauth';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -11,8 +12,21 @@ const GOOGLE_IOS_CLIENT_ID: string = import.meta.env.GOOGLE_IOS_CLIENT_ID ?? 'ex
 const SESSION = 'exalt.session';
 const PLACES = 'exalt.places';
 const VOICE = 'exalt.voice';
+const GOOGLE_NATIVE = 'exalt.google';
+// Sign in with Apple's web client (a Services ID whose return URL is ${API}/sign-in/return).
+const APPLE_SERVICES_ID: string = import.meta.env.APPLE_SERVICES_ID ?? 'app.exalt.audiobooks.web';
+// Where the server sends the iPhone app's Apple sheet back to; server/config.ts names the same.
+const APP_CALLBACK = 'app.exalt.audiobooks:/signed-in';
+// The iOS client's callback: its "iOS URL scheme" in Google's console, the reversed client ID.
+const GOOGLE_IOS_URL_SCHEME: string = import.meta.env.GOOGLE_IOS_URL_SCHEME ?? 'com.googleusercontent.apps.exalt-ios';
+const GOOGLE_IOS_CALLBACK = `${GOOGLE_IOS_URL_SCHEME}:/oauth2redirect`;
 export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
-  `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`].join('\n');
+  `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`,
+  // The iPhone app signs in with Google through @exact/oauth (below).
+  'net.fetch https://accounts.google.com', 'net.fetch https://oauth2.googleapis.com', 'auth.session https://accounts.google.com',
+  `auth.callback ${GOOGLE_IOS_CALLBACK}`, `secret.keep ${GOOGLE_NATIVE}`,
+  // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
+  'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
 type Reply = Result<'createAudiobook'>;
 type Book = Result<'searchBooks'>[number];
@@ -42,7 +56,7 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 const onWeb = () => { try { return /^https?:\/\//.test(authCallback()); } catch { return false; } };
 let ready: { nonce: string; client: string } | null = null;
 async function identityNonce() {
-  ready = (await post('/sign-in/nonce', { client: ready?.client, callback: onWeb() ? authCallback() : '' })) as { nonce: string; client: string };
+  ready = (await post('/sign-in/nonce', { client: ready?.client, callback: onWeb() ? authCallback() : APP_CALLBACK })) as { nonce: string; client: string };
   return { ok: true, error: '' };
 }
 const PROVIDERS = {
@@ -50,7 +64,66 @@ const PROVIDERS = {
 } as const;
 const errorName = (e: unknown) => String((e as { code?: string; name?: string })?.code ?? (e as { name?: string })?.name ?? 'error');
 
-async function signInWith(store: Store, name: 'google') {
+// In the iPhone app, Google through @exact/oauth: exact's native identity request for Google
+// isn't built (it fails NotSupportedError). PKCE in the system browser with the iOS client; the
+// server asks Google about the access token and answers a session, and the Google tokens are
+// then let go.
+const googleNative = oauth({ issuer: 'https://accounts.google.com', issuerAliases: ['accounts.google.com'],
+  clientId: GOOGLE_IOS_CLIENT_ID, scopes: ['openid', 'email', 'profile'], key: GOOGLE_NATIVE, apis: [API], callback: GOOGLE_IOS_CALLBACK });
+
+async function signInNative(store: Store) {
+  try {
+    const signed = await googleNative.signIn(store);
+    if (!signed.ok) return { ok: false, error: signed.code === 'cancelled' || signed.code === 'access_denied' ? '' : 'Sign-in didn’t work. Try again.' };
+    const res = await googleNative.fetch(store, `${API}/sign-in/google`, { method: 'POST' });
+    const done = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!done.ok) return { ok: false, error: 'Sign-in didn’t work. Try again.' };
+    store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || done.email || 'You') }));
+    return { ok: true, error: '' };
+  } catch {
+    return { ok: false, error: 'Can’t reach the server. Try again.' };
+  } finally {
+    await googleNative.signOut(store).catch(() => {});
+    await googleNative.session(store).catch(() => {});
+  }
+}
+
+// In the iPhone app, Apple's web sign-in in the system sheet: Apple posts to the server's return
+// route, which keeps the ID token under a handle and sends the sheet back to the app; the app
+// redeems the handle as the web does. exact's native Apple request isn't built.
+const randomState = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, '0')).join('');
+async function signInApple(store: Store) {
+  const asked = ready;
+  if (!asked) return { ok: false, error: 'Sign-in isn’t ready yet. Try again in a moment.' };
+  ready = null;
+  try {
+    const state = randomState();
+    const q = new URLSearchParams({ client_id: APPLE_SERVICES_ID, redirect_uri: `${API}/sign-in/return`, response_type: 'code id_token',
+      response_mode: 'form_post', scope: 'name email', state, nonce: asked.nonce });
+    let back: string;
+    try {
+      back = await openAuthSession(`https://appleid.apple.com/auth/authorize?${q}`, { callback: APP_CALLBACK, state });
+    } catch (e) {
+      // 499: the person closed the sheet.
+      return { ok: false, error: (e as { status?: number })?.status === 499 ? '' : 'Sign-in didn’t work. Try again.' };
+    }
+    const answer = new URLSearchParams(back.split('?')[1] ?? '');
+    const relay = answer.get('relay');
+    if (!relay) return { ok: false, error: ['user_cancelled_authorize', 'access_denied'].includes(answer.get('error') ?? '') ? '' : 'Sign-in didn’t work. Try again.' };
+    const done = await post('/sign-in/identity', { credential: { type: 'identity', configURL: 'https://appleid.apple.com', token: { relay } }, client: asked.client, nonce: asked.nonce });
+    if (!done.ok) return { ok: false, error: 'Sign-in didn’t work. Try again.' };
+    store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || done.email || 'You') }));
+    return { ok: true, error: '' };
+  } catch {
+    return { ok: false, error: 'Can’t reach the server. Try again.' };
+  } finally {
+    await identityNonce().catch(() => {});
+  }
+}
+
+async function signInWith(store: Store, name: 'google' | 'apple') {
+  if (!onWeb()) return name === 'apple' ? signInApple(store) : signInNative(store);
+  if (name === 'apple') return { ok: false, error: '' };
   const asked = ready;
   if (!asked) return { ok: false, error: 'Sign-in isn’t ready yet. Try again in a moment.' };
   ready = null;
@@ -180,8 +253,10 @@ const sources: Sources = {
     const s = session(store);
     return { signedIn: s != null, name: s?.name ?? '' };
   },
-  identityNonce: () => identityNonce(),
-  signInWith: (_a, store) => signInWith(store, 'google'),
+  // In the app it also readies the Google sign-in, so the press opens the sheet at once.
+  identityNonce: (_a, store) => (onWeb() ? identityNonce()
+    : Promise.all([identityNonce(), googleNative.session(store)]).then(() => ({ ok: true, error: '' }), () => ({ ok: true, error: '' }))),
+  signInWith: ([name], store) => signInWith(store, name === 'apple' ? 'apple' : 'google'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
   loadPlaces: async (_a, store) => placesEverywhere(store),
