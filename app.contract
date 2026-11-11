@@ -5,6 +5,7 @@
 use EmptyState from "exact:content"
 use getIdentityCapabilities, IdentityCapabilities from "@exact/sign-in"
 use getClientCapabilities, ClientCapabilities from "@exact/passkeys"
+use showNotification, notificationStatus, requestNotificationPermission, notificationclick, NotificationStatus, NotificationEvent from "@exact/notifications"
 
 // The lander's face: Jost (SIL Open Font License), cut to static weights.
 font "Jost"
@@ -111,6 +112,27 @@ shape Place
   duration: number
   at: number
 
+// A narrated chapter kept on this device, to play without a connection (under app:/cache/offline).
+shape Offline
+  gen: string
+  idx: number
+  path: string
+
+// A chapter this listener asked to have narrated that can be heard now (`ready`: its first part is
+// narrated, so it plays while the rest is), or couldn't be narrated (`status`).
+// `key` is how it was asked for: "gen/idx".
+shape Ready
+  key: string
+  gen: string
+  idx: number
+  title: string
+  book: string
+  status: string
+
+// Whether Exalt is on screen: a chapter that's ready while it isn't gets the system's notification.
+shape Page
+  visibilityState: string
+
 // A book on Home's shelf, with the few words its controls show.
 shape Shelved
   book: string
@@ -203,6 +225,17 @@ fn trackStatus(a: Audiobook, i: number): string = match a.chapters.at(i) { case 
 fn inFlight(status: string): bool = status == "queued" or status == "working"
 // What a chapter that isn't narrated says on its row.
 fn chapterNote(c: Chapter): string = c.status == "queued" ? "Waiting…" : c.status == "working" ? `Narrating… ${round(c.progress * 100)}%` : c.status == "unavailable" ? "Unavailable" : c.status == "failed" ? "Didn’t finish" : ""
+// A chapter asked for is kept as "gen/idx".
+fn keyGen(k: string): string = match k.split("/").at(0) { case some(g) => g, case none => "" }
+fn keyIdx(k: string): number = match k.split("/").at(1) { case some(s) => (match parseNumber(s) { case some(n) => n, case none => 0 }), case none => 0 }
+// Where a chapter's download is on this device, or "".
+fn keptAt(kept: Offline[], gen: string, idx: number): string = match kept.filter(o => o.gen == gen and o.idx == idx).at(0) { case some(o) => o.path, case none => "" }
+// The sleep timer: 0 is off, -1 the end of the chapter, else minutes (counted down in seconds while playing).
+fn sleepText(mins: number, left: number): string = mins == -1 ? "Pausing at the end of this chapter" : `Pausing in ${clock(left)}`
+fn chapterCount(n: number): string = `${n} ${n == 1 ? "chapter" : "chapters"}`
+// A version's download: what it says, and the line under it.
+fn savedTitle(kept: number, narrated: number, saving: bool): string = saving ? `Downloading · ${kept} of ${narrated}` : kept > 0 and kept >= narrated ? "Downloaded" : kept > 0 ? `${kept} of ${narrated} chapters downloaded` : "Listen offline"
+fn savedNote(kept: number, narrated: number): string = kept > 0 and kept >= narrated ? `${chapterCount(kept)} on this device, to play without a connection` : kept > 0 ? "Download the rest to hear them offline too" : `Save ${narrated == 1 ? "the narrated chapter" : `the ${narrated} narrated chapters`} to this device`
 
 component App
   state query = ""
@@ -264,7 +297,10 @@ component App
   resource models = loadModels() as shape Model[] else empty()
   resource detail = loadBook(bookId) as shape BookDetail else empty()
   resource bookSources = loadBookSources(top(nav).name == "create" ? bookId : "") as shape BookSources else empty(available=false, files=[])
-  resource audiobook = loadAudiobook(genId) as shape Audiobook else empty()
+  // What plays: one version at a time, held at App level so it keeps playing while the listener
+  // browses. The player shows it; a copy downloaded with it answers when the server can't.
+  state loaded = ""
+  resource audiobook = loadAudiobook(loaded) as shape Audiobook else empty()
   mutation created as shape Reply refreshes detail, listening, account, mine, shelf then afterCreate
   mutation generated as shape Reply refreshes audiobook, detail, mine then afterGenerate
   mutation removed as shape Reply refreshes detail, listening, mine, shelf then afterRemove
@@ -307,6 +343,45 @@ component App
   state duration = 0
   state rate = 1
   state resumeTime = 0
+  // The source last given the element, and for which chapter ("gen/idx"): the same chapter from
+  // another source (its download arriving, or removed) carries on where it was.
+  state heardSrc = ""
+  state heardKey = ""
+  // The sleep timer: 0 off, minutes, or -1 for the end of the chapter; the seconds left, counted while playing.
+  state sleepMins = 0
+  state sleepLeft = 0
+  // Downloads: the chapters kept on this device, and the version being saved.
+  resource offline = loadOffline() as shape Offline[] else empty()
+  mutation savedAll as shape Reply refreshes offline then afterSave
+  mutation unsaved as shape Reply refreshes offline then afterUnsave
+  state saving = ""
+  state saveError = ""
+  // Chapters this listener asked for ("gen/idx"), until they're narrated, and the notice when one is.
+  state wanted: string[] = [] persist
+  state askedKey = ""
+  resource readyNow = chaptersReady(wanted.join(",")) as shape Ready[] else empty()
+  state notice = ""
+  state noticeBook = ""
+  state noticeKey = ""
+  resource page = exactPage() as shape Page
+  resource noteStatus = notificationStatus() as shape NotificationStatus
+  mutation notePerm as shape NotificationStatus
+  derive playerOpen = top(nav).name == "play"
+  // The loaded version's record has arrived; until it has, nothing plays (the last one's chapters aren't its).
+  derive here = loaded != "" and audiobook.id == loaded
+  derive keptSrc = here ? keptAt(offline, loaded, track) : ""
+  derive playSrc = not here ? "" : keptSrc != "" ? keptSrc : trackSrc(audiobook, track)
+  // The mini player: whatever is loaded, over every screen but the player (and the door and Import).
+  derive miniOn = here and not playerOpen and fore == "" and top(nav).name != "lander" and top(nav).name != "create"
+  // What a download takes: the chapters narrated in full (one still narrating plays as a live stream, not a file).
+  derive narratedHere = audiobook.chapters.filter(c => c.status == "ready" and c.src != "").length
+  derive keptHere = audiobook.chapters.filter(c => c.status == "ready" and c.src != "" and keptAt(offline, audiobook.id, c.idx) != "").length
+  derive anyKept = offline.filter(o => o.gen == audiobook.id).length > 0
+  derive savingHere = pending(savedAll) and saving == audiobook.id
+  // A ready chapter not yet announced.
+  derive fresh = readyNow.filter(r => wanted.filter(w => w == r.key).length > 0)
+  derive freshKey = match first(fresh) { case some(r) => r.key, case none => "" }
+  derive away = page.visibilityState != "visible"
   derive fishModel = model.startsWith("fish-audio/")
   derive mineWorking = mine.filter(m => m.status == "queued" or m.status == "working").length > 0
   derive playerCover = wide ? min(240, round(viewport.height * 0.28)) : min(220, round(viewport.width * 0.56))
@@ -346,9 +421,25 @@ component App
   derive voiceBusy = voiceQuery.trim() != voiceAsked or pending(voiceList)
   derive searchError = pending(found) ? "" : match failure(found) { case some(f) => "Search isn’t reachable right now. Try again.", case none => "" }
 
-  // While playing, the place is kept every so often (and at every pause and chapter's end).
-  task keeping when top(nav).name == "play" and not held
+  // While playing, wherever the listener is, the place is kept every so often (and at every pause and chapter's end).
+  task keeping when loaded != "" and not held
     every(15000, keepPlace)
+  // The player opened at its address (a reload, a link) loads that version.
+  task adopting when playerOpen and genId != loaded
+    after(1, adopt)
+  task resourcing when playSrc != heardSrc
+    after(1, heardIt)
+  // The sleep timer counts while playing; a pause holds it. Stopped at a chapter that isn't narrated
+  // there's nothing to pause, so it runs out.
+  task sleeping when sleepLeft > 0 and (not held or playSrc == "")
+    every(1000, sleepTick)
+  // A download shows each chapter as it lands.
+  task watchingSave when pending(savedAll)
+    every(1000, refreshOffline)
+  task announcing when freshKey != "" key=freshKey
+    after(1, announce)
+  task noticing when notice != "" key=noticeKey
+    after(8000, clearNotice)
   task voiceSearching when voiceQuery.trim() != voiceAsked key=voiceQuery
     after(300, takeVoiceQuery)
 
@@ -393,9 +484,12 @@ component App
   action pull
     if working
       refresh detail
-    // The player watches its version while chapters narrate, and while it waits at one that isn't narrated (anyone may narrate it).
-    if top(nav).name == "play" and (narrating or trackSrc(audiobook, track) == "")
+    // What's loaded is watched while its chapters narrate, and while the player waits at one that isn't narrated (anyone may narrate it).
+    if loaded != "" and (narrating or (playerOpen and trackSrc(audiobook, track) == ""))
       refresh audiobook
+    // So are the chapters this listener asked for, wherever they are.
+    if wanted.length > 0
+      refresh readyNow
     if mineWorking
       refresh mine
       refresh shelf
@@ -526,6 +620,7 @@ component App
     if what == "import"
       openCreate()
     else if what == "chapter"
+      askedKey = `${audiobook.id}/${pendingChapter}`
       send generated = generateChapter(audiobook.id, pendingChapter)
     else if what == "make" and canCreate
       send created = createAudiobook(bookId, filePath, fileName, sourceId, link.trim(), model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
@@ -585,16 +680,52 @@ component App
     haptic(createError == "" ? "success" : "error")
     if createError == "" and top(nav).name == "create"
       nav = back(nav)
-  // Listening picks up where this device left off, if it has been here before.
-  action listen(id: string)
+  // Loading a version picks up where the listener left off, if they've been here before; the one
+  // playing keeps its place first.
+  action loadVersion(id: string, play: bool)
+    keepPlace()
+    loaded = id
     track = match first(places.filter(p => p.gen == id)) { case some(p) => p.track, case none => 0 }
     resumeTime = match first(places.filter(p => p.gen == id)) { case some(p) => p.time, case none => 0 }
     now = 0
     duration = 0
-    held = false
+    held = not play
     genRefusal = ""
     confirmDelete = false
+    saveError = ""
+  // Listening opens the player; the version already loaded carries on where it is.
+  action listen(id: string)
+    if id != loaded
+      loadVersion(id, true)
+    else if playSrc != ""
+      held = false
     nav = push(nav, path("play", id))
+  // Opened at its address, the player loads its version, paused until a press.
+  action adopt
+    if genId != loaded
+      loadVersion(genId, false)
+  action openPlayer
+    nav = push(nav, path("play", loaded))
+  // A chapter played from its notice: its version loaded if it isn't, the player opened at it.
+  action playChapter(gen: string, idx: number)
+    notice = ""
+    if gen != loaded
+      keepPlace()
+      loaded = gen
+      genRefusal = ""
+      confirmDelete = false
+      saveError = ""
+    else
+      refresh audiobook
+    track = idx
+    now = 0
+    duration = 0
+    resumeTime = 0
+    held = false
+    if playerOpen and genId != gen
+      nav = go(nav, path("play", gen))
+    else if not playerOpen
+      nav = push(nav, path("play", gen))
   action resume(p: Place)
     listen(p.gen)
   action openMine(m: Mine)
@@ -602,21 +733,35 @@ component App
       listen(m.gen)
     else
       nav = push(nav, path("book", m.book))
+  // A narrated chapter in the list plays from its start; the one playing carries on.
   action playTrack(i: number)
     haptic("selection")
-    track = i
-    now = 0
-    duration = 0
+    if i != track
+      track = i
+      now = 0
+      duration = 0
+      resumeTime = 0
+      keepAt(i, 0, 0)
     held = trackSrc(audiobook, i) == ""
   // At a chapter's end the next one plays; one that isn't narrated yet stops the player there, and offers Generate.
   action nextTrack
+    advance(false)
+  // A chapter's end: the sleep timer set for it pauses there, at the start of the next.
+  action chapterEnded
+    if sleepMins == -1
+      sleepMins = 0
+      advance(true)
+    else
+      advance(false)
+  action advance(stop: bool)
     let following = track + 1
     if following < audiobook.chapters.length
       // A chapter's end pauses the element first (HTML fires `pause` before `ended`): play on.
       track = following
       now = 0
       duration = 0
-      held = trackSrc(audiobook, following) == ""
+      resumeTime = 0
+      held = stop or trackSrc(audiobook, following) == ""
       keepAt(following, 0, 0)
     else
       held = true
@@ -628,11 +773,19 @@ component App
       track = track - 1
       now = 0
       duration = 0
+      resumeTime = 0
   action keepPlace
     keepAt(track, now, duration)
   action keepAt(tr: number, t: number, d: number)
-    if audiobook.id != "" and audiobook.id == genId
+    if here
       send placed = savePlace(audiobook.id, audiobook.book, audiobook.title, audiobook.author, audiobook.cover, tr, audiobook.chapters.length, t, d, time.epochAtZero + performanceNow())
+  // The element's source changed: for the same chapter (a download landing, or removed), it resumes where it was.
+  action heardIt
+    let key = `${loaded}/${track}`
+    if heardSrc != "" and playSrc != "" and heardKey == key and now > 0
+      resumeTime = now
+    heardSrc = playSrc
+    heardKey = key
   action tick(t: number)
     now = t
   action gotDuration(d: number)
@@ -671,23 +824,95 @@ component App
       needAccount("chapter")
     else if not genPending
       haptic("impact-light")
+      askedKey = `${audiobook.id}/${i}`
+      askToNotify()
       send generated = generateChapter(audiobook.id, i)
+  // A chapter asked for is watched until it's narrated, to say so.
   action afterGenerate
-    genRefusal = match generated { case some(r) => r.error, case none => "" }
-    haptic(genRefusal == "" ? "success" : "error")
+    let said = match generated { case some(r) => r.error, case none => "" }
+    genRefusal = said
+    haptic(said == "" ? "success" : "error")
+    if said == "" and askedKey != ""
+      wanted = wanted.filter(w => w != askedKey).concat([askedKey])
+  // The first chapter asked for asks, at the press, whether Exalt may say when one is ready.
+  action askToNotify
+    if noteStatus.available and noteStatus.state == "prompt" and not pending(notePerm)
+      send notePerm = requestNotificationPermission()
+  // A chapter this listener asked for is ready: a notice here, and the system's while Exalt is in the background.
+  action announce
+    match first(fresh)
+      case some(r)
+        wanted = wanted.filter(w => w != r.key)
+        // The version playing learns of its new chapter at once, wherever the listener is.
+        if r.gen == loaded
+          refresh audiobook
+        if r.status == "ready"
+          if away and noteStatus.state == "granted"
+            showNotification(title=`${r.title} is ready`, body=`${r.book} · tap to play it`, tag=r.key, data=r.key)
+          if not (playerOpen and r.gen == loaded and r.idx == track)
+            notice = r.title
+            noticeBook = r.book
+            noticeKey = r.key
+      case none
+        notice = notice
+  action noticePlay
+    haptic("impact-medium")
+    playChapter(keyGen(noticeKey), keyIdx(noticeKey))
+  action clearNotice
+    notice = ""
+  // The system's notification, pressed: its chapter plays.
+  action noticeOpened(tag: string, e: NotificationEvent)
+    playChapter(keyGen(tag), keyIdx(tag))
+  // The sleep timer, from the player's menu.
+  action setSleep(m: number)
+    haptic("selection")
+    sleepMins = m
+    sleepLeft = m > 0 ? m * 60 : 0
+  action sleepTick
+    if sleepLeft <= 1
+      sleepLeft = 0
+      sleepMins = 0
+      held = true
+      keepPlace()
+    else
+      sleepLeft = sleepLeft - 1
+  // Downloads: a version's narrated chapters to this device, one after another, and removed again.
+  action download
+    haptic("impact-light")
+    saving = audiobook.id
+    saveError = ""
+    send savedAll = downloadVersion(audiobook.id)
+  action afterSave
+    let failed = match savedAll { case some(r) => r.error, case none => "" }
+    saveError = failed
+    saving = ""
+    haptic(failed == "" ? "success" : "error")
+  action unsave
+    haptic("selection")
+    saveError = ""
+    send unsaved = removeDownload(audiobook.id)
+  action afterUnsave
+    saveError = match unsaved { case some(r) => r.error, case none => "" }
+  action refreshOffline
+    refresh offline
   action askDelete
     confirmDelete = true
   action keepIt
     confirmDelete = false
   action remove
     send removed = deleteAudiobook(audiobook.id)
+  // A deleted version stops playing, and its download goes with it.
   action afterRemove
     confirmDelete = false
-    genRefusal = match removed { case some(r) => r.error, case none => "" }
-    haptic(genRefusal == "" ? "success" : "error")
-    if genRefusal == "" and top(nav).name == "play"
+    let said = match removed { case some(r) => r.error, case none => "" }
+    genRefusal = said
+    haptic(said == "" ? "success" : "error")
+    if said == ""
+      send unsaved = removeDownload(audiobook.id)
       held = true
-      nav = back(nav)
+      loaded = ""
+      if playerOpen
+        nav = back(nav)
   // Voices: browse or search Fish Audio's community library, hear a sample, choose one.
   action editVoiceQuery(v: string)
     voiceQuery = v
@@ -709,7 +934,7 @@ component App
     send prefSet = setVoicePref(v.id, v.title, v.cover)
 
   view
-    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed testId="app" width="100%" height="100%" viewport-fit="cover" color-scheme="light" accent-color="#14171f"
+    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed notificationclick=noticeOpened testId="app" width="100%" height="100%" viewport-fit="cover" color-scheme="light" accent-color="#14171f"
       for e in stack(nav) key=e.id
         if e.name == "lander"
           column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color=(phoneDoor ? "#eceef2" : "#121419") testId="lander"
@@ -1165,25 +1390,41 @@ component App
                         progress aria-label="Preparing"
                       text (audiobook.status == "failed" ? audiobook.error : "Preparing the book…") font-family="Jost" font-size="1rem" line-height=1.4
                         color=(audiobook.status == "failed" ? "#f0a093" : "#d6d3cb") text-align="center"
-                  else if trackSrc(audiobook, track) != ""
+                  else if playSrc != ""
                     column gap=6
                       input type="range" min=0 max=max(1, round(duration)) step=1 value=round(now) input=scrub aria-label="Position" testId="scrub" width="100%" accent-color="#eeebe4"
                       row justify-content="space-between"
                         text clock(now) font-family="Jost" font-size="0.75rem" color="#b5b2aa" testId="elapsed"
                         text (duration > 0 ? `−${clock(duration - now)}` : "") font-family="Jost" font-size="0.75rem" color="#b5b2aa"
-                    row justify-content="space-between" align-items="center" padding="10px 18px" border-radius=999 backgroundMaterial="glass"
-                      button press=cycleRate appearance="none" aria-label="Speed" testId="rate" min-width=48 padding="8px 0" cursor="pointer" -exact-press-scale=0.9
-                        text rateText(rate) font-family="Jost" font-weight=500 font-size="0.9375rem" color="#eeebe4" text-align="center"
-                      button press=back15 appearance="none" aria-label="Back 15 seconds" testId="back15" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
-                        image "symbol:skip-back-15" color="#eeebe4" width=28 height=28
-                      button press=toggle appearance="none" aria-label=(held ? "Play" : "Pause") aria-keyshortcuts="Space" testId="toggle"
-                        width=68 height=68 min-width=68 padding=0 flex-shrink=0 border-radius=999 display="flex" align-items="center" justify-content="center" background-color="#eeebe4" cursor="pointer"
-                        box-shadow="0 14px 36px -10px rgba(0,0,0,0.6)" -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
-                        image (held ? "symbol:play-fill" : "symbol:pause-fill") color="#14171f" width=26 height=26
-                      button press=fwd30 appearance="none" aria-label="Forward 30 seconds" testId="fwd30" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
-                        image "symbol:skip-forward-30" color="#eeebe4" width=28 height=28
-                      row width=48 justify-content="center"
-                        image "symbol:waveform" color=(held ? "#8f8c85" : "#eeebe4") width=20 height=20
+                    column gap=12
+                      row justify-content="space-between" align-items="center" padding="10px 18px" border-radius=999 backgroundMaterial="glass"
+                        button press=cycleRate appearance="none" aria-label="Speed" testId="rate" min-width=48 padding="8px 0" cursor="pointer" -exact-press-scale=0.9
+                          text rateText(rate) font-family="Jost" font-weight=500 font-size="0.9375rem" color="#eeebe4" text-align="center"
+                        button press=back15 appearance="none" aria-label="Back 15 seconds" testId="back15" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
+                          image "symbol:skip-back-15" color="#eeebe4" width=28 height=28
+                        button press=toggle appearance="none" aria-label=(held ? "Play" : "Pause") aria-keyshortcuts="Space" testId="toggle"
+                          width=68 height=68 min-width=68 padding=0 flex-shrink=0 border-radius=999 display="flex" align-items="center" justify-content="center" background-color="#eeebe4" cursor="pointer"
+                          box-shadow="0 14px 36px -10px rgba(0,0,0,0.6)" -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
+                          image (held ? "symbol:play-fill" : "symbol:pause-fill") color="#14171f" width=26 height=26
+                        button press=fwd30 appearance="none" aria-label="Forward 30 seconds" testId="fwd30" padding=8 cursor="pointer" -exact-press-scale=0.88 -exact-press-haptic="impact-light"
+                          image "symbol:skip-forward-30" color="#eeebe4" width=28 height=28
+                        button popovertarget="sleep-menu" appearance="none" aria-label=(sleepMins == 0 ? "Sleep timer" : `Sleep timer: ${sleepText(sleepMins, sleepLeft)}`) testId="sleep"
+                          min-width=48 padding="8px 0" cursor="pointer" display="flex" justify-content="center" -exact-press-scale=0.9 -exact-press-haptic="selection"
+                          image "symbol:moon" color=(sleepMins != 0 ? "#eeebe4" : "#8f8c85") width=20 height=20
+                      if sleepMins != 0
+                        text sleepText(sleepMins, sleepLeft) font-family="Jost" font-size="0.8125rem" color="#d6d3cb" text-align="center" testId="sleep-left"
+                    // The sleep timer's choices, as the platform's menu; a choice checks it.
+                    column id="sleep-menu" popover="auto" role="menu" aria-label="Sleep timer"
+                      button press=setSleep(0) aria-checked=(sleepMins == 0) popovertarget="sleep-menu" popovertargetaction="hide" testId="sleep-off"
+                        text "Off"
+                      button press=setSleep(15) aria-checked=(sleepMins == 15) popovertarget="sleep-menu" popovertargetaction="hide" testId="sleep-15"
+                        text "15 minutes"
+                      button press=setSleep(30) aria-checked=(sleepMins == 30) popovertarget="sleep-menu" popovertargetaction="hide" testId="sleep-30"
+                        text "30 minutes"
+                      button press=setSleep(60) aria-checked=(sleepMins == 60) popovertarget="sleep-menu" popovertargetaction="hide" testId="sleep-60"
+                        text "1 hour"
+                      button press=setSleep(-1) aria-checked=(sleepMins == -1) popovertarget="sleep-menu" popovertargetaction="hide" testId="sleep-chapter"
+                        text "End of chapter"
                   // A chapter with no audio yet: the player stops here and offers to narrate it.
                   else
                     column gap=12 align-items="center" padding="22px 20px" border-radius=30 backgroundMaterial="glass" testId="not-narrated"
@@ -1206,17 +1447,15 @@ component App
                         text `${audiobook.mine} of ${audiobook.limit} in progress` font-family="Jost" font-size="0.8125rem" color=(atLimit ? "#eeebe4" : "#b5b2aa") testId="in-progress"
                     for c in audiobook.chapters key=c.idx
                       row align-items="center" column-gap=12 flex-wrap="wrap" border-top="1px solid rgba(238,235,228,0.1)" testId=`chapter-${c.idx}`
-                        button press=playTrack(c.idx) appearance="none" text-align="start" display="flex" align-items="center" gap=16 padding="13px 0" flex="1 1 10rem" min-width=0
-                          cursor="pointer" testId=`track-${c.idx}` -exact-press-opacity=0.6
-                          text `${c.idx + 1}` font-family="Jost" font-size="0.8125rem" color="#eeebe4" width=24 flex-shrink=0
-                          column flex=1 min-width=0 gap=2
-                            text c.title line-clamp=2 font-family="Jost" font-weight=(c.idx == track ? 500 : 400) font-size="1rem" line-height=1.4 color="#eeebe4"
-                            if c.status != "ready" and chapterNote(c) != ""
-                              text (c.status == "failed" and c.error != "" ? c.error : chapterNote(c)) line-clamp=2 font-family="Jost" font-size="0.8125rem"
-                                color=(c.status == "failed" ? "#f6b8ad" : "#eeebe4") testId=`chapter-note-${c.idx}`
-                          // Narrated: the one playing shows its waveform, the others play.
-                          if c.src != ""
+                        // Narrated: a tap plays it (the one playing shows its waveform). Not yet: its row offers Generate.
+                        if c.src != ""
+                          button press=playTrack(c.idx) appearance="none" text-align="start" display="flex" align-items="center" gap=16 padding="13px 0" flex="1 1 10rem" min-width=0
+                            cursor="pointer" aria-current=(c.idx == track ? "true" : "false") testId=`track-${c.idx}` -exact-press-opacity=0.6
+                            ChapterLine(chapter=c, current=(c.idx == track), kept=(keptAt(offline, audiobook.id, c.idx) != ""))
                             image (c.idx == track ? "symbol:waveform" : "symbol:play-fill") color="#eeebe4" font="-exact-callout" flex-shrink=0
+                        else
+                          row align-items="center" gap=16 padding="13px 0" flex="1 1 10rem" min-width=0 testId=`track-${c.idx}`
+                            ChapterLine(chapter=c, current=(c.idx == track), kept=false)
                         if c.status == "idle" or c.status == "failed"
                           button press=generate(c.idx) buttonStyle="glass" aria-label=`Generate chapter ${c.idx + 1}` testId=`generate-${c.idx}` disabled=(atLimit or genPending) flex-shrink=0 margin-bottom=6
                             text (c.status == "failed" ? "Retry" : "Generate")
@@ -1224,6 +1463,27 @@ component App
                           progress aria-label=`Narrating chapter ${c.idx + 1}` flex-shrink=0
                     if atLimit
                       text `${audiobook.limit} of ${audiobook.limit} in progress. Generate again when one finishes.` font-family="Jost" font-size="0.8125rem" line-height=1.45 color="#b5b2aa" padding="10px 0 6px" testId="at-limit"
+                  // Download: the narrated chapters kept on this device, to play without a connection.
+                  if narratedHere > 0 or anyKept
+                    column gap=14 padding="18px 20px" border-radius=30 backgroundMaterial="glass" testId="download-box"
+                      row gap=14 align-items="center"
+                        image (keptHere > 0 and keptHere >= narratedHere ? "symbol:checkmark" : savingHere ? "symbol:download-pending" : "symbol:download") color="#eeebe4" font-size="1.25rem" flex-shrink=0
+                        column flex=1 min-width=0 gap=3
+                          text savedTitle(keptHere, narratedHere, savingHere) font-family="Jost" font-size="1rem" color="#eeebe4" testId="download-state"
+                          if not savingHere
+                            text savedNote(keptHere, narratedHere) font-family="Jost" font-size="0.8125rem" line-height=1.4 color="#b5b2aa"
+                      if savingHere
+                        progress value=keptHere max=max(1, narratedHere) aria-label="Downloading" testId="download-progress" width="100%" accent-color="#eeebe4"
+                      else
+                        row gap=10 flex-wrap="wrap"
+                          if keptHere < narratedHere
+                            button press=download buttonStyle="glass" testId="download" disabled=(pending(savedAll) or pending(unsaved))
+                              text (keptHere > 0 ? "Download the rest" : "Download")
+                          if anyKept
+                            button press=unsave buttonStyle="glass" testId="remove-download" disabled=(pending(savedAll) or pending(unsaved))
+                              text "Remove download"
+                      if saveError != ""
+                        text saveError font-family="Jost" font-size="0.8125rem" line-height=1.45 color="#f0a093" testId="download-error"
                   // Its maker may delete it: its audio goes for everyone.
                   if audiobook.owner
                     if confirmDelete
@@ -1238,19 +1498,44 @@ component App
                       button press=askDelete appearance="none" testId="delete" align-self="center" padding="6px 0" cursor="pointer"
                         text "Delete this audiobook" font-family="Jost" font-size="0.875rem" color="#b5b2aa" border-bottom="1px solid rgba(238,235,228,0.25)" padding-bottom=2
                   text `${audiobook.model} · ${audiobook.by}` font-family="Jost" font-size="0.8125rem" color="#9a978f" text-align="center"
-              if trackSrc(audiobook, track) != ""
-                audio id="player-audio" src=trackSrc(audiobook, track) paused=held playbackRate=rate preload="auto"
-                  timeupdate=tick durationchange=gotDuration loadedmetadata=resumeAt ended=nextTrack play=played pause=stopped
-                  metadata=MediaMetadata(title=trackTitle(audiobook, track), artist=audiobook.author, album=audiobook.title, artwork=audiobook.cover)
-                  seekbackward=back15 seekforward=fwd30 nexttrack=nextTrack previoustrack=prevTrack testId="audio"
             row align-items="center" padding=(wide ? "24px 7vw" : "8px 16px") position="absolute" top="env(safe-area-inset-top)" left=0 right=0 z-index=5 pointer-events="none"
               button press=back buttonStyle="glass" aria-label="Back" testId="player-back" pointer-events="auto"
                 image "symbol:back"
-      // The dock, over every main screen on a phone: the book in progress, and the tabs.
-      if docked
+      // The one player, for every screen: it keeps playing while the listener browses. The lock
+      // screen's skips are the player's own, back 15 and ahead 30.
+      if playSrc != ""
+        audio id="player-audio" src=playSrc paused=held playbackRate=rate preload="auto"
+          timeupdate=tick durationchange=gotDuration loadedmetadata=resumeAt ended=chapterEnded play=played pause=stopped
+          metadata=MediaMetadata(title=trackTitle(audiobook, track), artist=audiobook.author, album=audiobook.title, artwork=audiobook.cover)
+          seekbackwardOffset=15 seekforwardOffset=30
+          seekbackward=back15 seekforward=fwd30 nexttrack=nextTrack previoustrack=prevTrack testId="audio"
+      // The dock, over every main screen on a phone: what's playing, and the tabs. A wide window
+      // has its tabs at the top, so its dock is the mini player alone.
+      if docked or (wide and miniOn)
         column position="absolute" left=0 right=0 bottom=0 align-items="center" gap=10 pointer-events="none" z-index=20 testId="dock"
-          padding="0 16px clamp(14px, calc(env(safe-area-inset-bottom) - 8px), 40px)"
-          for p in (top(nav).name == "home" or top(nav).name == "book" ? [] : places.slice(0, 1)) key=p.gen
+          padding=(wide ? "0 16px 24px" : "0 16px clamp(14px, calc(env(safe-area-inset-bottom) - 8px), 40px)")
+          // The mini player: the chapter playing, to pause or play; a tap on it opens the player.
+          if miniOn
+            row width="100%" max-width="23.125rem" box-sizing="border-box" align-items="center" gap=6 padding=6 border-radius=999 position="relative" overflow="hidden"
+              backgroundMaterial="glass" class=Lift pointer-events="auto" testId="mini-player"
+              animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+              button press=openPlayer appearance="none" aria-label=`Now playing: ${trackTitle(audiobook, track)}, ${audiobook.title}` testId="mini-open" text-align="start" cursor="pointer"
+                flex=1 min-width=0 display="flex" align-items="center" gap=12 padding="0 4px 0 0" -exact-press-opacity=0.7 -exact-press-haptic="impact-light"
+                if audiobook.cover != ""
+                  image audiobook.cover alt="" width=44 height=44 border-radius=999 object-fit="cover" flex-shrink=0
+                else
+                  view width=44 height=44 border-radius=999 background-color="#2a2d36" flex-shrink=0
+                column flex=1 min-width=0 gap=1 font-size="min(-exact-subheadline, 20px)"
+                  text trackTitle(audiobook, track) font-family="Jost" font-size="1em" color="#14171f" line-clamp=1 testId="mini-title"
+                  text audiobook.title font-family="Jost" font-size="0.8em" color="#5c6170" line-clamp=1 testId="mini-book"
+              button press=toggle appearance="none" aria-label=(held ? "Play" : "Pause") testId="mini-toggle" disabled=(playSrc == "")
+                width=44 height=44 min-width=44 padding=0 flex-shrink=0 border-radius=999 display="flex" align-items="center" justify-content="center"
+                background-color="#14171f" opacity=(playSrc == "" ? 0.35 : 1) cursor="pointer" -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
+                image (held ? "symbol:play-fill" : "symbol:pause-fill") color="#f4f2ec" font-size="min(-exact-subheadline, 18px)"
+              // How far into the chapter: a hairline along the capsule's foot.
+              view position="absolute" left=28 right=28 bottom=0 height=2 border-radius=1 background-color="rgba(20,23,31,0.1)" pointer-events="none"
+                view height=2 border-radius=1 background-color="#14171f" width=`${duration > 0 ? round(min(1, now / duration) * 100) : 0}%`
+          for p in (miniOn or wide or top(nav).name == "home" or top(nav).name == "book" ? [] : places.slice(0, 1)) key=p.gen
             button press=resume(p) appearance="none" aria-label=`Resume ${p.title}` testId="mini" pointer-events="auto" text-align="start" cursor="pointer"
               width="100%" max-width=370 box-sizing="border-box" display="flex" align-items="center" gap=12 padding="8px 10px 8px 8px" border-radius=999
               backgroundMaterial="glass" class=Lift -exact-press-scale=0.97 -exact-press-haptic="impact-light"
@@ -1264,20 +1549,35 @@ component App
               view width=38 height=38 border-radius=999 background-color="#14171f" display="flex" align-items="center" justify-content="center" flex-shrink=0
                 image "symbol:play-fill" color="#f4f2ec" width=13 height=13
           // On a book's page the tabs give way: back on the left, the book's Play or Generate on the right.
-          if top(nav).name == "book"
-            row width="100%" max-width=370 box-sizing="border-box" align-items="center" gap=10 pointer-events="auto" role="toolbar" aria-label="Book" testId="book-bar"
-              animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
-              button press=back buttonStyle="glass" aria-label="Back" testId="dock-back"
-                image "symbol:back"
-              view flex=1
-              if detail.book.id == bookId
-                BookAction(playing=bookPlaying, press=bookAction)
-          else
-            row padding=5 gap=2 border-radius=999 backgroundMaterial="glass" class=Lift pointer-events="auto" role="navigation"
-              animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
-              DockTab(to=path("home"), id="nav-home", label="Home", symbol=(top(nav).name == "home" ? "symbol:home-fill" : "symbol:home"), on=(top(nav).name == "home"))
-              DockTab(to=path("explore"), id="nav-explore", label="Explore", symbol="symbol:search", on=(top(nav).name == "explore"))
-              DockTab(to=path("voices"), id="nav-voices", label="Voices", symbol="symbol:waveform", on=(top(nav).name == "voices"))
+          if docked
+            if top(nav).name == "book"
+              row width="100%" max-width=370 box-sizing="border-box" align-items="center" gap=10 pointer-events="auto" role="toolbar" aria-label="Book" testId="book-bar"
+                animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+                button press=back buttonStyle="glass" aria-label="Back" testId="dock-back"
+                  image "symbol:back"
+                view flex=1
+                if detail.book.id == bookId
+                  BookAction(playing=bookPlaying, press=bookAction)
+            else
+              row padding=5 gap=2 border-radius=999 backgroundMaterial="glass" class=Lift pointer-events="auto" role="navigation"
+                animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+                DockTab(to=path("home"), id="nav-home", label="Home", symbol=(top(nav).name == "home" ? "symbol:home-fill" : "symbol:home"), on=(top(nav).name == "home"))
+                DockTab(to=path("explore"), id="nav-explore", label="Explore", symbol="symbol:search", on=(top(nav).name == "explore"))
+                DockTab(to=path("voices"), id="nav-voices", label="Voices", symbol="symbol:waveform", on=(top(nav).name == "voices"))
+      // A chapter this listener asked for is ready: a notice at the top, to play it.
+      if notice != ""
+        row position="absolute" top="calc(env(safe-area-inset-top) + 10px)" left=16 right=16 margin="0 auto" max-width="25rem" box-sizing="border-box" z-index=30
+          align-items="center" gap=10 padding="8px 8px 8px 20px" border-radius=999 backgroundMaterial="glass" class=Lift color-scheme="light" role="status" testId="notice"
+          animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+          column flex=1 min-width=0 gap=1 font-size="min(-exact-subheadline, 20px)"
+            text notice font-family="Jost" font-size="1em" color="#14171f" line-clamp=1 testId="notice-title"
+            text `Ready to play · ${noticeBook}` font-family="Jost" font-size="0.8em" color="#5c6170" line-clamp=1
+          button press=noticePlay appearance="none" aria-label=`Play ${notice}` testId="notice-play"
+            height=40 padding="0 18px" flex-shrink=0 border-radius=999 display="flex" align-items="center" gap=6 background-color="#14171f" cursor="pointer" -exact-press-scale=0.94
+            image "symbol:play-fill" color="#f4f2ec" font-size="min(-exact-caption1, 16px)"
+            text "Play" font-family="Jost" font-weight=500 font-size="min(-exact-subheadline, 20px)" color="#f4f2ec"
+          button press=clearNotice appearance="none" aria-label="Dismiss" testId="notice-close" class=Round width=40 height=40
+            image "symbol:close" color="#5c6170" font-size="min(-exact-caption1, 16px)"
       // One sheet to log in or sign up, for whatever needs an account: Generate, a chapter, Make.
       // The app's own buttons, as the door's sheet has; the site needs Exact's (it holds the popup at the press).
       dialog id="account-sheet" aria-label="Log in or sign up" close=sheetClosed testId="account-sheet"
@@ -1323,6 +1623,26 @@ component GoogleMark
       path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
       path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
       path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+
+// A chapter's line in the player's list: its number, its title (the one playing set heavier), and
+// how its narration is going when it isn't narrated.
+component ChapterLine
+  props
+    chapter: Chapter
+    current: bool
+    kept: bool
+  view
+    row flex=1 min-width=0 align-items="center" gap=16
+      text `${chapter.idx + 1}` font-family="Jost" font-size="0.8125rem" color="#eeebe4" width=24 flex-shrink=0
+      column flex=1 min-width=0 gap=2
+        text chapter.title line-clamp=2 font-family="Jost" font-weight=(current ? 500 : 400) font-size="1rem" line-height=1.4 color="#eeebe4"
+        if chapter.status != "ready" and chapterNote(chapter) != ""
+          text (chapter.status == "failed" and chapter.error != "" ? chapter.error : chapterNote(chapter)) line-clamp=2 font-family="Jost" font-size="0.8125rem"
+            color=(chapter.status == "failed" ? "#f6b8ad" : "#eeebe4") testId=`chapter-note-${chapter.idx}`
+        else if kept
+          row gap=5 align-items="center" testId=`chapter-kept-${chapter.idx}`
+            image "symbol:checkmark" color="#b5b2aa" font-size="0.625rem"
+            text "Downloaded" font-family="Jost" font-size="0.75rem" color="#b5b2aa"
 
 // One of a book's numbers: the figure, and what it counts.
 component Stat
