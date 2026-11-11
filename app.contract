@@ -211,6 +211,8 @@ component App
   state filePath = ""
   state fileName = ""
   state sourceId = ""
+  // A pasted link to a book file, which the server downloads (server/link.ts).
+  state link = ""
   state model = ""
   state voice = ""
   state rights = false
@@ -334,8 +336,9 @@ component App
   derive genPending = pending(generated)
   derive voices = match first(models.filter(m => m.id == model)) { case some(m) => m.voices, case none => [] }
   derive createError = match created { case some(r) => r.error, case none => "" }
-  derive canCreate = (filePath != "" or sourceId != "") and model != "" and rights and not pending(created)
-  derive createHint = pending(created) ? (sourceId != "" ? "Downloading book and preparing audiobook…" : "Uploading…") : filePath == "" and sourceId == "" ? "Choose a book file or upload your own." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
+  derive linkOk = link.trim() == "" or link.trim().startsWith("https://")
+  derive canCreate = (filePath != "" or sourceId != "" or link.trim() != "") and linkOk and model != "" and rights and not pending(created)
+  derive createHint = pending(created) ? (sourceId != "" or link.trim() != "" ? "Downloading book and preparing audiobook…" : "Uploading…") : filePath == "" and sourceId == "" and link.trim() == "" ? "Choose a book file, paste a link or upload your own." : not linkOk ? "Paste a link that starts with https://." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
   derive showSuggestions = suggestOpen and suggestFor.length >= 2 and suggestFor == query.trim() and suggestFor != asked and suggestions.length > 0
   // The field shows it is working from the first keystroke's pause to the answer.
   derive searching = asked != "" and pending(found)
@@ -525,7 +528,7 @@ component App
     else if what == "chapter"
       send generated = generateChapter(audiobook.id, pendingChapter)
     else if what == "make" and canCreate
-      send created = createAudiobook(bookId, filePath, fileName, sourceId, model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
+      send created = createAudiobook(bookId, filePath, fileName, sourceId, link.trim(), model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
   // Dismissed without signing in: nothing carries on later.
   action sheetClosed
     if not account.signedIn
@@ -535,6 +538,7 @@ component App
     openURL(url)
   action openCreate
     sourceId = ""
+    link = ""
     filePath = ""
     fileName = ""
     rights = false
@@ -547,9 +551,19 @@ component App
     sourceId = v
     filePath = ""
     fileName = ""
+    link = v == "" ? link : ""
     refusal = ""
+  // A link is one way to the book: typing one sets the others aside.
+  action editLink(v: string)
+    link = v
+    refusal = ""
+    if v.trim() != ""
+      sourceId = ""
+      filePath = ""
+      fileName = ""
   action picked(files: Picked[])
     sourceId = match first(files) { case some(f) => "", case none => sourceId }
+    link = match first(files) { case some(f) => "", case none => link }
     filePath = match first(files) { case some(f) => f.path, case none => filePath }
     fileName = match first(files) { case some(f) => f.name, case none => fileName }
   action pickModel(v: string)
@@ -565,7 +579,7 @@ component App
     if canCreate and not account.signedIn
       needAccount("make")
     else if canCreate
-      send created = createAudiobook(bookId, filePath, fileName, sourceId, model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
+      send created = createAudiobook(bookId, filePath, fileName, sourceId, link.trim(), model, fishModel ? voicePref.id : voice.trim(), fishModel ? voicePref.title : voice.trim(), me.trim(), rights)
   action afterCreate
     refusal = createError
     haptic(createError == "" ? "success" : "error")
@@ -1052,6 +1066,14 @@ component App
                     text (bookSources.available ? "No EPUB or PDF download found. Upload your own file." : "Book downloads aren’t connected. Upload your own file.") font-family="Jost" font-size="0.9375rem" line-height=1.45 color="#6b7080" testId="source-empty"
                   if sourceId != ""
                     text "This file will be downloaded and split into chapters, and its first chapter narrated in your voice." font-family="Jost" font-size="0.875rem" color="#6b7080" testId="source-note"
+                  input type="url" value=link input=editLink placeholder="Or paste a link to an EPUB, PDF or TXT" aria-label="Link to a book file" testId="link"
+                    autocapitalize="none" autocomplete="off" spellcheck=false
+                    width="100%" box-sizing="border-box" appearance="none" font-family="Jost" font-size="1rem" color="#14171f"
+                    background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.35)" border-radius=0 padding="10px 0" outline="none"
+                    ::placeholder
+                      color="#6b7080"
+                  if link.trim() != ""
+                    text "The server downloads this file (HTTPS, under 50 MB) and splits it into chapters, and its first chapter is narrated in your voice." font-family="Jost" font-size="0.875rem" line-height=1.45 color="#6b7080" testId="link-note"
                   row gap=16 align-items="center" padding="10px 0" border-bottom="1px solid rgba(20,23,31,0.08)"
                     text (fileName == "" ? "Or upload an EPUB, PDF or TXT" : fileName) flex=1 min-width=0 line-clamp=1 font-family="Jost" font-size="1rem"
                       color=(fileName == "" ? "#6b7080" : "#14171f") testId="file-name"

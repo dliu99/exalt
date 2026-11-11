@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { wav } from './tts.ts';
-import { chunks } from './parse.ts';
+import { partsOf } from './parse.ts';
 
 async function start(dir: string, extra: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, 'server/index.ts', '--offline'], {
@@ -82,7 +82,7 @@ test('a whole-book job from before chapters were asked for one at a time keeps i
     // The second chapter crosses TTS chunk boundaries: every chunk's second of PCM is in its M4A.
     expect(gen.tracks[1].src).toBe(`/audio/${id}/1.m4a`);
     const second = join(dir, 'audio', String(id), '1.m4a');
-    const parts = chunks(`${chapter(2).title}. ${chapter(2).text}`).length;
+    const parts = partsOf(chapter(2).title, chapter(2).text).length;
     expect(parts).toBeGreaterThan(1);
     const seconds = Number(Bun.spawnSync(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', second]).stdout.toString());
     expect(Math.abs(seconds - parts)).toBeLessThan(0.1);

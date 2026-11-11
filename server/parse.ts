@@ -435,16 +435,24 @@ async function byOutline(pdf: Pdf, pages: string[]): Promise<Chapter[] | null> {
   return out;
 }
 
-// TTS endpoints take a bounded input: split at sentence ends under `max` characters.
-export function chunks(text: string, max = 3000): string[] {
+// TTS endpoints take a bounded input: split at sentence ends under `max` characters. With
+// `first`, the chunks start smaller and double up to `max` (first, 2×first, …), so the opening
+// of a chapter comes back from the provider soonest.
+export function chunks(text: string, max = 3000, first = max): string[] {
   const sentences = text.match(/[^.!?…]+[.!?…]+["'’”)]*\s*|[^.!?…]+$/g) ?? [text];
   const out: string[] = [];
+  const limit = () => Math.min(max, first * 2 ** out.length);
   let cur = '';
   for (const s of sentences) {
-    if (cur && cur.length + s.length > max) { out.push(cur.trim()); cur = ''; }
+    if (cur && cur.length + s.length > limit()) { out.push(cur.trim()); cur = ''; }
     if (s.length > max) { for (let i = 0; i < s.length; i += max) out.push(s.slice(i, i + max)); continue; }
     cur += s;
   }
   if (cur.trim()) out.push(cur.trim());
   return out;
 }
+
+// What a chapter is narrated in: its title read first, then its text, in parts that start at
+// about 600 characters (some 40 seconds of speech) and grow to 3,000. The first part is back
+// from the provider in seconds, and plays while the larger ones are narrated.
+export const partsOf = (title: string, text: string) => chunks(`${title}. ${text}`, 3000, 600);

@@ -65,6 +65,30 @@ test "Import is the form for anyone: the book's searches, its file, a voice and 
   clock data
   expect text "book-title" == "A Quiet Harbour"
 
+test "Import takes a pasted link: an https link to a book file, which sets a download aside"
+  at "/book/OL1W/import"
+  clock data
+  expect tree has "link"
+  expect tree missing "link-note"
+  type "book-source" "lg-00000000000000000000000000000001"
+  expect tree has "source-note"
+  type "link" "http://books.example/a-quiet-harbour.txt"
+  expect state sourceId == ""
+  expect tree missing "source-note"
+  type "model" "exalt/silence"
+  tap "rights"
+  expect state canCreate == false
+  expect text "create-hint" == "Paste a link that starts with https://."
+  type "link" "https://books.example/a-quiet-harbour.txt"
+  expect tree has "link-note"
+  expect state canCreate == true
+  expect enabled "create-save"
+  // Signed out, Make asks for an account first, and carries on with the link.
+  tap "create-save"
+  expect tree has "account-site-google"
+  expect state pendingAuth == "make"
+  expect state link == "https://books.example/a-quiet-harbour.txt"
+
 test "signed out, Generate opens the sheet to log in or sign up, and stays on the book"
   size 390x844
   tap "enter"
@@ -298,3 +322,19 @@ test "once a chapter is narrated the dock plays the book"
   clock data
   expect tree has "player"
   expect text "now-playing" == "Chapter One: The Harbour"
+
+// Last: it adds a version to the run’s shared database.
+test "a book imported by link is split into chapters; a link to a private address is refused"
+  request POST "/books/OL2W/generations?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2F127.0.0.1%2Fbook.epub" as ada expect 400
+  request POST "/books/OL2W/generations?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as ada
+  clock +1500 real
+  tap "enter"
+  tap "nav-explore"
+  type "search" "rivers"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL2W"
+  clock data
+  // The tests before it made version 1, of the other book; nothing was made of the refused link.
+  expect text "status-2" == "ada · 1 of 3 chapters narrated"
+  expect tree missing "status-3"

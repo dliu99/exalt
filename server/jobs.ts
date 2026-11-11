@@ -8,8 +8,9 @@ import { open } from 'node:fs/promises';
 import { rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { db, tracksOf, type ChapterRow, type GenerationRow } from './db.ts';
-import { type Chapter, chunks, parseBook } from './parse.ts';
-import { speak } from './tts.ts';
+import { type Chapter, parseBook, partsOf } from './parse.ts';
+import { partsAtOnce, speak, type Voice } from './tts.ts';
+import { beginLive, endLive, liveFile } from './live.ts';
 import { compress, requireEncoder, STORED_BYTES_PER_SECOND } from './encode.ts';
 import { AUDIO_DIR, SCRATCH_DIR, deleteAudio, requireDiskSpace, saveAudio, storageKind } from './storage.ts';
 import { MAX_TEXT_CHARS, MAX_GENERATION_BYTES } from './limits.ts';
@@ -32,9 +33,9 @@ export type Payload = { source: string; offline?: boolean } | { chapters: Chapte
 let running = false;
 const ACTIVE = "('queued', 'working')";
 
-// The offline server's download (`--offline`): a short book of three chapters, so a test can
+// The offline server's download (`--offline`, and its sample link): a short book of three chapters, so a test can
 // prepare one, hear its first chapter and ask for the others.
-const OFFLINE_BOOK = `Chapter One: The Harbour
+export const OFFLINE_BOOK = `Chapter One: The Harbour
 A quiet harbour opens onto a wide river where the ships come and go each morning, and the people gather on the stones to watch them sail out past the lighthouse.
 Chapter Two: The River
 Upstream the river narrows between green banks, and the boatmen call to one another across the water as they pole their flat boats toward the market town.
@@ -172,6 +173,17 @@ export function requestChapter(id: number, idx: number, user: number) {
   if (status === 'queued') wake();
   return status;
 }
+/**
+ * A signed-in listener's place has reached chapter `idx - 1`: chapter `idx` is asked for on their
+ * behalf if it is waiting for someone, so it is narrated before they get there. It counts toward
+ * their MAX_ACTIVE; at the limit, with the queue full or the server out of room, nothing happens.
+ * A chapter that failed is left for its Retry.
+ */
+export function narrateAhead(id: number, idx: number, user: number): boolean {
+  const c = db.query('SELECT status FROM chapters WHERE generation_id = ? AND idx = ?').get(id, idx) as { status: string } | null;
+  if (c?.status !== 'idle') return false;
+  try { return requestChapter(id, idx, user) === 'queued'; } catch { return false; }
+}
 const ask = db.transaction((id: number, idx: number, user: number): string => {
   const g = db.query('SELECT status FROM generations WHERE id = ?').get(id) as { status: string } | null;
   if (!g) throw new Refused('No such audiobook.', 404);
@@ -242,17 +254,30 @@ async function narrate(c: ChapterRow & { model: string; voice: string }) {
     db.query("UPDATE chapters SET status = 'unavailable' WHERE generation_id = ? AND idx = ?").run(id, idx);
     return;
   }
-  const parts = chunks(`${c.title}. ${text}`);
+  const parts = partsOf(c.title, text);
   db.query("UPDATE chapters SET status = 'working', parts_done = 0, parts_total = ? WHERE generation_id = ? AND idx = ?").run(parts.length, id, idx);
   const path = join(SCRATCH_DIR, `${id}-${idx}.partial`);
   const file = await open(path, 'w');
+  // Each part plays as soon as it and those before it are narrated (live.ts).
+  const live = beginLive(id, idx);
+  // Parts are asked for a few at a time (as many as the provider takes, tts.ts) and written in order.
+  const asked: Promise<Voice>[] = [];
+  const ask = (upTo: number) => {
+    while (asked.length < parts.length && asked.length < upTo) {
+      const p = speak(c.model, c.voice, parts[asked.length]);
+      p.catch(() => {}); // one asked ahead may fail after this chapter already has
+      asked.push(p);
+    }
+  };
   // A chapter is raw PCM (its parts' samples) or MP3 (its parts' frames) until it is compressed.
   let pcm: boolean | undefined, rate = 0, raw = 0;
   try {
     checkCapacity();
-    for (const part of parts) {
+    for (let i = 0; i < parts.length; i++) {
       if (!stillThere(id, idx)) throw new Removed();
-      const v = await speak(c.model, c.voice, part);
+      ask(i + partsAtOnce(c.model));
+      const v = await asked[i];
+      if (!stillThere(id, idx)) throw new Removed();
       const thisRate = v.ext === 'wav' ? new DataView(v.audio.buffer, v.audio.byteOffset, 44).getUint32(24, true) : v.rate ?? 0;
       if (pcm !== undefined && (pcm !== (v.ext !== 'mp3') || rate !== thisRate)) throw new Error('The speech provider changed audio formats mid-chapter.');
       pcm = v.ext !== 'mp3'; rate = thisRate;
@@ -262,12 +287,15 @@ async function narrate(c: ChapterRow & { model: string; voice: string }) {
       if (overLimit(id, pcm ? Math.ceil(raw / (rate * 2) * STORED_BYTES_PER_SECOND) : raw)) throw new Error('The audiobook reached the audio storage limit.');
       // A chapter is streamed to scratch; no chapter's audio is held in memory.
       await file.writeFile(audio);
+      await live.push(audio, pcm ? rate : undefined);
       db.query('UPDATE chapters SET parts_done = parts_done + 1 WHERE generation_id = ? AND idx = ?').run(id, idx);
     }
+    await live.finish();
     await file.sync(); await file.close();
     const stored = await compress(path, pcm ? rate : undefined);
     if (overLimit(id, stored.bytes)) throw new Error('The audiobook reached the audio storage limit.');
-    const name = `${id}/${idx}.${stored.ext}`;
+    // Usually the address it has been playing at (live.ts); an MP3 kept as the provider made it is the exception.
+    const name = stored.ext === 'm4a' ? liveFile(id, idx) : `${id}/${idx}.${stored.ext}`;
     const storage = await saveAudio(name, stored.path);
     const kept = db.transaction(() => {
       if (!stillThere(id, idx)) return false;
@@ -281,7 +309,10 @@ async function narrate(c: ChapterRow & { model: string; voice: string }) {
   } catch (e) {
     if (!(e instanceof Removed)) db.query("UPDATE chapters SET status = 'failed', error = ? WHERE generation_id = ? AND idx = ?")
       .run(String((e as Error).message ?? e).slice(0, 500), id, idx);
-  } finally { await file.close().catch(() => {}); rmSync(path, { force: true }); rmSync(`${path}.m4a`, { force: true }); }
+  } finally {
+    endLive(id, idx);
+    await file.close().catch(() => {}); rmSync(path, { force: true }); rmSync(`${path}.m4a`, { force: true });
+  }
 }
 // Begin recovery after imports and route setup have completed.
 setTimeout(wake, 0);
