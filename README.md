@@ -30,6 +30,7 @@ domain or that they hold the rights to share it.
 | `server/index.ts` | Bun HTTP server: catalog, uploads, audio with byte ranges |
 | `server/auth.ts` | Accounts: checks Apple's and Google's ID tokens, issues session tokens |
 | `server/db.ts` | SQLite schema: `books`, `generations`, `tracks` |
+| `server/places.ts` | Where each signed-in listener is in each audiobook, so their devices carry over |
 | `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
 | `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
 | `server/encode.ts` | Compresses each narrated chapter to AAC in M4A with ffmpeg before it is stored |
@@ -113,7 +114,8 @@ availability can change; this is an optional external provider, not an uptime gu
 | Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
 | Incomplete chapter audio (raw PCM or MP3) | `AUDIO_DIR/.tmp` | Removed after compression and upload, or failure; interrupted chapter is overwritten on resume |
 | Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
-| Listening position and voice preference | The listener's device | Until cleared |
+| Listening position | The listener's device; for a signed-in listener also SQLite `places` (chapter, time, when), newest wins | Device: until cleared. Server: retained, a finished book's row marked finished |
+| Voice preference | The listener's device | Until cleared |
 
 The backend runs **one instance and one generation worker**. SQLite is a durable queue of
 two kinds of work: preparing a version (download, split into chapters) and narrating one
@@ -246,9 +248,16 @@ tokens, but the app offers no Apple button for now). It asks the server for a si
 the provider signs an ID token over that nonce. `server/auth.ts` checks the token's signature
 against the provider's published keys, along with its issuer, audience, expiry and nonce. Then it
 answers a session token of Exalt's own: the app keeps it in its secret store and sends it as a
-bearer token. Only `POST /books/:id/generations` needs one, and each audiobook records the account
+bearer token. `POST /books/:id/generations` needs one, and each audiobook records the account
 that made it (`generations.user_id`). On the web, the provider returns to `/sign-in/return` on the
 server, which hands the page a single-use handle for the token.
+
+A signed-in listener's place in each audiobook follows them between devices. The player saves it
+every 15 seconds while it plays, at a pause and at a chapter's change; `app.ts` keeps it on the
+device and, with a session, sends it to `PUT /me/places/:gen`. Home and the player read
+`GET /me/places` and take the newest of the device's and the server's places for each audiobook, by
+when it was heard (a device clock ahead of the server's counts as the server's now). A book finished
+on one device leaves the others' shelves. Signed out, places stay on the device and are never sent.
 
 Register these clients, then set them for both the build (`app.json` `env`) and the server:
 

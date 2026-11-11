@@ -306,8 +306,8 @@ component App
   resource account = currentAccount() as shape Account else empty(signedIn=false, name="")
   resource identities = getIdentityCapabilities() as shape IdentityCapabilities
   mutation nonce as shape Reply
-  mutation signedIn as shape Reply refreshes account, mine, shelf, audiobook
-  mutation left as shape Reply refreshes account, mine, shelf
+  mutation signedIn as shape Reply refreshes account, mine, shelf, places, audiobook
+  mutation left as shape Reply refreshes account, mine, shelf, places, audiobook
   derive signInError = match signedIn { case some(r) => r.error, case none => "" }
   derive bookId = match stack(nav).filter(e => e.name == "book" or e.name == "create").at(-1) { case some(e) => e.params.id, case none => "" }
   derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }

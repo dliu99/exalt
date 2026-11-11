@@ -14,6 +14,7 @@ import { lg } from './libgen.ts';
 import { audioType, audioURL, validateAudioFile } from './storage.ts';
 import { zlib } from './zlibrary.ts';
 import { listVoices } from './fish.ts';
+import { keepPlace, placeFrom, placeJson, placesOf } from './places.ts';
 
 let uploading = 0;
 const OFFLINE = process.argv.includes('--offline');
@@ -94,6 +95,22 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     const me = userOf(req);
     if (!me) return send({ error: 'Not signed in.' }, 401);
     return send(generationsBy(me.id).map((g) => ({ ...versionJson(g), book: g.book_id, title: g.title, author: g.author, cover: g.cover })));
+  } },
+  // Where the signed-in person is in each audiobook (places.ts), so their devices carry over.
+  '/me/places': { OPTIONS: preflight, GET: (req) => {
+    const me = accounts.user(req);
+    if (!me) return send({ error: 'Not signed in.' }, 401);
+    return send(placesOf(me.id).map(placeJson));
+  } },
+  // One place, kept unless the server already has a newer one; answers whichever it keeps.
+  '/me/places/:gen': { OPTIONS: () => new Response(null, { status: 204, headers: { ...CORS, 'access-control-allow-methods': 'PUT' } }), PUT: async (req) => {
+    const me = accounts.user(req);
+    if (!me) return send({ error: 'Not signed in.' }, 401);
+    const gen = Number(req.params.gen);
+    if (!Number.isSafeInteger(gen) || !getGeneration(gen)) return send({ error: 'No such audiobook.' }, 404);
+    const place = placeFrom(await json(req));
+    if (!place) return send({ error: 'Not a place in this audiobook.' }, 400);
+    return send(placeJson(keepPlace(me.id, gen, place)));
   } },
   '/sign-out': { OPTIONS: preflight, POST: (req) => { accounts.signOut(req); return send({ ok: true }); } },
 
