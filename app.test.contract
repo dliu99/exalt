@@ -34,6 +34,7 @@ test "an empty library says how to start"
   expect tree missing "book-OL1W"
 
 test "search finds a book and opens its page"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "rivers"
@@ -48,6 +49,7 @@ test "search finds a book and opens its page"
   expect tree missing "book-description"
 
 test "making an audiobook waits for a file and consent"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -63,6 +65,7 @@ test "making an audiobook waits for a file and consent"
   expect state canCreate == false
 
 test "making an audiobook asks for an account, with Google's button"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -87,6 +90,7 @@ test "making an audiobook asks for an account, with Google's button"
   expect text "book-title" == "A Quiet Harbour"
 
 test "typing suggests books under the field, and one opens its page"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "r"
@@ -105,6 +109,7 @@ test "typing suggests books under the field, and one opens its page"
   expect text "book-title" == "Notes on Rivers"
 
 test "enter shows every result and closes the suggestions"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "rivers"
@@ -140,6 +145,7 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   expect tree has "home"
 
 test "signed out, making an audiobook shows only the sign-in, not the form"
+  clock data
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -156,6 +162,7 @@ test "signed out, making an audiobook shows only the sign-in, not the form"
   expect tree missing "create-hint"
 
 test "a search settles to its books, and the field clears"
+  clock data
   tap "enter"
   tap "nav-explore"
   expect tree missing "search-clear"

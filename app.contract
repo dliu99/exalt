@@ -638,9 +638,9 @@ component App
                         text g.title font-family="Jost" font-weight=400 font-size="1.125rem" color="#14171f" text-align="center" line-clamp=1 testId="great-title"
                         text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
                       if not gated
-                        button press=seek(g) testId="seek" position="relative" class=Chip backgroundMaterial="glass"
-                          text "Open in Exalt" font-family="Jost" font-weight=400 font-size="0.9375rem" color="#14171f"
-                          image "symbol:forward-chevron" color="#14171f" width="0.6875rem" height="0.6875rem"
+                        button press=seek(g) appearance="none" testId="seek" position="relative" padding="4px 0" cursor="pointer"
+                          -exact-press-opacity=0.6 -exact-press-haptic="selection"
+                          text "Open in Exalt  →" font-family="Jost" font-weight=400 font-size="0.875rem" color="#14171f"
                   // The door: Google's own button, the one way in.
                   if gated
                     column align-items="center" gap=10 width="100%" max-width="18.75rem" position="relative" opacity=max(0, 1 - fade * 1.5) testId="door"
@@ -680,8 +680,10 @@ component App
               view flex=1 display=(phoneDoor ? "none" : "flex")
                 link href="/" testId="wordmark" pointer-events="auto" padding="6px 0" font-size="min(-exact-body, 23px)"
                   text "EXALT" font-family="Jost" font-weight=500 font-size="0.875em" letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
-              if not gated
-                link href=path("home") testId="enter" pointer-events="auto" class=Chip font-size="min(-exact-body, 23px)" backgroundMaterial="glass" color-scheme=(lit ? "dark" : "light")
+              // Home only once there's a way in: a visitor the site asks to sign in first has only the wordmark.
+              if account.signedIn or not door.ok
+                link href=path("home") testId="enter" padding="6px 0" pointer-events="auto" font-size="min(-exact-body, 23px)"
+                  -exact-press-opacity=0.6 -exact-press-haptic="selection"
                   text "Home" font-family="Jost" font-weight=400 font-size="0.9375em" letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
         // Home: a shelf in the fog. Six recent books; the one picked comes forward, its controls under it.
         if e.name == "home"
