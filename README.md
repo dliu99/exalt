@@ -5,11 +5,15 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
 - **One record per book.** Books come from Open Library (title, author, year, cover), keyed by
   their work id. Every audiobook anyone makes of a book hangs off that one record.
 - **Make an audiobook** by selecting a LibGen EPUB/PDF (or an optional Z-Library source) or uploading an EPUB, PDF or TXT, then choosing a voice model. The
-  server splits the file into chapters, voices the whole book up front, and stores one audio
-  file per chapter.
-- **Listen.** A book's page shows a sample (the first chapter of its first finished
+  server splits the file into chapters and narrates the first. The rest are narrated one at a
+  time, when someone asks: each version's chapter list (on the player) has **Generate** beside
+  every chapter not yet narrated. Anyone signed in may press it, with at most three chapters
+  waiting or narrating per account at once. Each narrated chapter is one stored audio file, kept
+  for everyone.
+- **Listen.** A book's page shows a sample (the first narrated chapter of its first
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
-  plays chapter after chapter.
+  plays narrated chapters in order and stops at one that isn't narrated yet, offering to
+  narrate it. The person who made a version can delete it, its audio with it.
 
 Exalt opens on Sign in with Google: nothing is reachable without an account (the offline server used by tests leaves the door open).
 
@@ -29,7 +33,7 @@ domain or that they hold the rights to share it.
 | `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
 | `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
 | `server/encode.ts` | Compresses each narrated chapter to AAC in M4A with ffmpeg before it is stored |
-| `server/jobs.ts` | Durable SQLite queue, admission limits and chapter checkpoints |
+| `server/jobs.ts` | Durable SQLite queue: preparing versions, narrating chapters on request, admission limits |
 | `server/libgen.ts` | LibGen discovery, JSON metadata and verified downloads |
 | `server/storage.ts` | Local or S3-compatible chapter audio storage |
 
@@ -89,8 +93,8 @@ LibGen is enabled by default, with no account or API key. Search includes its EP
 results alongside the metadata catalog; `BOOK_PROVIDER=libgen` searches it alone. On a
 book's **New Audiobook** sheet, choose a file under **Download**, select a voice, confirm
 sharing rights and press **Make**. The server responds with a generation ID immediately
-(`202`); the worker downloads and verifies the file before narration. Source failures appear
-on the book's generation status. Uploads remain available.
+(`202`); the worker downloads and verifies the file, splits it into chapters and narrates the
+first. Source failures appear on the book's generation status. Uploads remain available.
 
 The adapter uses HTML search, `json.php` for edition/file details, and the download landing
 page to resolve a short-lived link. Requests have timeouts, bounded responses and mirror
@@ -104,20 +108,36 @@ availability can change; this is an optional external provider, not an uptime gu
 | Data | Storage | Retention |
 | --- | --- | --- |
 | Book metadata, accounts, hashed sessions, source IDs/hashes, narration settings and progress | SQLite at `DB` | Retained |
-| Queued source reference or extracted chapter text | SQLite `generation_jobs` | Removed on completion or failure |
+| Queued source reference (a download not yet prepared) | SQLite `generation_jobs` | Removed once the version is prepared, or fails |
+| Each chapter's extracted text | SQLite `chapters.text` | Kept until that chapter is narrated, then removed; removed with its version |
 | Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
 | Incomplete chapter audio (raw PCM or MP3) | `AUDIO_DIR/.tmp` | Removed after compression and upload, or failure; interrupted chapter is overwritten on resume |
 | Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
 | Listening position and voice preference | The listener's device | Until cleared |
 
-The backend runs **one instance and one generation worker**. SQLite is a durable queue:
-a restart resumes queued work and skips completed chapters. An interrupted chapter may
-repeat TTS calls; completed chapters do not. New jobs are capped at 20 pending globally and
-two per account. Concurrent upload parsing is capped at two. Books default to a limit of five
-million extracted characters, and each generated audiobook to 2 GiB stored. EPUB expansion is
-bounded and chapter audio is written to scratch chunk by chunk, rather than accumulated
-in memory. Transient TTS failures retry up to three attempts. The same source, book, model
-and voice reuse an existing queued/working/ready generation instead of generating again.
+The backend runs **one instance and one generation worker**. SQLite is a durable queue of
+two kinds of work: preparing a version (download, split into chapters) and narrating one
+chapter. Preparing goes first, since a new version's first chapter waits on it; chapters are
+narrated in the order they were asked for. A restart resumes queued work; the chapter it was
+narrating starts over and may repeat TTS calls, finished chapters do not. At most 20 pieces of
+work (chapters waiting or narrating, versions being prepared) are queued at once, and at most
+**three per account**: a version being prepared counts as one (it asks for its first chapter),
+and a fourth Generate is refused (`429`) until one finishes. Concurrent upload parsing is capped
+at two. Books default to a limit of five million extracted characters, and each generated
+audiobook to 2 GiB stored. EPUB expansion is bounded and chapter audio is written to scratch
+chunk by chunk, rather than accumulated in memory. Transient TTS failures retry up to three
+attempts; a chapter that still fails shows **Retry**, its text kept. The same source, book,
+model and voice reuse an existing queued/working/ready generation instead of generating again.
+
+Narrating on request means a book costs only the chapters people listen to. Because each
+chapter's text is kept until it is narrated, a prepared version holds its book's text in
+SQLite (up to `MAX_BOOK_CHARACTERS`, five million by default) until every chapter is narrated
+or the version is deleted. Versions made before this change kept no text once their job ended:
+their narrated chapters play, and any they never narrated show as unavailable.
+
+`--offline` takes the test driver's persona tokens (`Authorization: Bearer ada`, what a test's
+`request … as ada` sends) as accounts of their own, so screen tests can make versions and
+narrate chapters as other people. Only the offline server does.
 
 ### Audio format and size
 
@@ -140,9 +160,10 @@ books), and a bucket of 1,000 such books is about 150 GB.
 
 The Render blueprint mounts a 10 GB persistent disk. The default 8 GiB audio cap and a
 256 MiB free-space check stop work before normal audio growth consumes the disk; queue,
-metadata, scratch, WAL and backups also need space. Failed versions may retain completed
-chapters for playback and count against the cap. Audio has no automatic eviction: monitor
-storage and expand it or remove obsolete versions operationally. Back up SQLite and local
+metadata, scratch, WAL and backups also need space. Failed chapters keep the chapters already
+narrated, which count against the cap. Audio has no automatic eviction: its maker can delete a
+version (`DELETE /generations/:id`), which removes its audio from disk or the bucket; otherwise
+monitor storage and expand it or remove obsolete versions operationally. Back up SQLite and local
 audio together. Queue payload deletion is logical cleanup; backups can retain earlier data.
 This is a bounded single-server deployment, not horizontal generation scaling. Multiple API
 instances/workers require a shared database and job-claiming/lease design first.
@@ -253,9 +274,10 @@ and saved as one WAV per chapter; the others are MP3. Run the server from the re
 
 ## Next
 
-- **Streaming generation.** Voice a chapter when someone first plays it and keep it for
-  everyone. This costs less than voicing whole books, and fits a free model that may not stay free.
-- Let people remove their own versions, and cap how many each account makes per day.
+- Narrate the next chapter ahead of the listener (when they are near the end of one), within
+  their three, so a book plays on without stopping.
+- Cap how many chapters each account narrates per day, beside the three-at-once limit.
+- More than one narration worker, for a provider that allows it.
 - Ratings of versions; reviews beside the Goodreads link.
 - Shared database and leased worker jobs for horizontal generation scaling.
 - Audio retention/deletion controls and storage usage reporting.

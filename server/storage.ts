@@ -38,6 +38,12 @@ export async function saveAudio(file: string, path: string): Promise<'s3' | 'loc
   renameSync(path, join(AUDIO_DIR, file));
   return 'local';
 }
+// Removes a stored chapter (a deleted version's); one already gone is fine.
+export async function deleteAudio(file: string, storage: string) {
+  validateAudioFile(file);
+  if (storage === 's3') { if (s3) await s3.file(key(file)).delete().catch(() => {}); return; }
+  rmSync(join(AUDIO_DIR, file), { force: true });
+}
 export function audioURL(file: string): string {
   validateAudioFile(file);
   if (!s3) throw new Error('The audio bucket is not configured on this server.');

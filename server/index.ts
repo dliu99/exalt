@@ -4,10 +4,10 @@
 import { createHash } from 'node:crypto';
 import { join as pathJoin, normalize } from 'node:path';
 import { API, CLIENTS } from './config.ts';
-import { auth, type Provider } from './auth.ts';
+import { auth, type Provider, type User } from './auth.ts';
 import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
-import { booksWithAudio, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
-import { AUDIO_DIR, enqueue, reserve, failJob, QueueFull } from './jobs.ts';
+import { booksWithAudio, chaptersOf, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
+import { AUDIO_DIR, activeFor, enqueue, failJob, MAX_ACTIVE, prepared, QueueFull, Refused, removeGeneration, requestChapter, reserve } from './jobs.ts';
 import { parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
 import { lg } from './libgen.ts';
@@ -18,7 +18,7 @@ import { listVoices } from './fish.ts';
 let uploading = 0;
 const OFFLINE = process.argv.includes('--offline');
 consolidate();
-const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST, DELETE', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
 const preflight = () => new Response(null, { status: 204, headers: CORS });
 const fail = (e: unknown, status = 502) => send({ error: String((e as Error).message ?? e) }, status);
@@ -35,15 +35,33 @@ const accounts = auth({
   googleSecret: process.env.GOOGLE_CLIENT_SECRET,
   ...(idp ? { keys: async (_p: Provider) => (await idp.jwks(testKeys)).keys, exchange: (code: string) => idp.exchange(testKeys, code) } : {}),
 });
-const signInRequired = () => send({ error: 'Sign in to make an audiobook.' }, 401);
+const signInRequired = (what = 'make an audiobook') => send({ error: `Sign in to ${what}.` }, 401);
+// Under --offline the test driver writes as a persona (`request … as ada`): its bearer token is the
+// persona's name, standing for an account of its own. Nothing but the offline server takes one.
+function persona(req: Request): User | null {
+  const name = req.headers.get('authorization')?.match(/^Bearer ([a-z]{2,20})$/)?.[1];
+  if (!name) return null;
+  db.query("INSERT OR IGNORE INTO users (provider, sub, name, email, created_at) VALUES ('google', ?, ?, ?, ?)").run(`persona:${name}`, name, `${name}@example.com`, Date.now());
+  return db.query("SELECT * FROM users WHERE provider = 'google' AND sub = ?").get(`persona:${name}`) as User;
+}
+const userOf = (req: Request) => accounts.user(req) ?? (OFFLINE ? persona(req) : null);
 
 const back = (r: { status: number; location?: string; body?: string }) =>
   r.location ? new Response(null, { status: r.status, headers: { location: r.location } }) : new Response(r.body ?? '', { status: r.status });
 const bookJson = (b: BookRow, versions: number) => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, description: b.description, versions });
+// A version: `status` is its preparation's (queued, working, ready, failed); `done` of `total`
+// chapters are narrated, and `active` are waiting or narrating.
 const versionJson = (g: GenerationRow) => {
   const first = tracksOf(g.id)[0];
-  return { id: String(g.id), by: g.made_by, model: g.model, voice: g.voice, status: g.status, done: g.done, total: g.total, error: g.error,
+  const active = (db.query("SELECT COUNT(*) AS n FROM chapters WHERE generation_id = ? AND status IN ('queued', 'working')").get(g.id) as { n: number }).n;
+  return { id: String(g.id), by: g.made_by, model: g.model, voice: g.voice, status: g.status, done: g.done, total: g.total, active, error: g.error,
     sample: first ? `/audio/${first.file}` : '', voiceName: g.voice_name ?? '' };
+};
+// A version's chapters: each narrated one's audio, and how far a narrating one has got.
+const chaptersJson = (g: GenerationRow) => {
+  const files = new Map(tracksOf(g.id).map((t) => [t.idx, t.file]));
+  return chaptersOf(g.id).map((c) => ({ idx: c.idx, title: c.title, status: c.status, error: c.error,
+    src: files.has(c.idx) ? `/audio/${files.get(c.idx)}` : '', progress: c.parts_total ? c.parts_done / c.parts_total : 0 }));
 };
 
 // Locally the server listens where the app looks for it (API_BASE_URL); a host such as Render
@@ -73,7 +91,7 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   } },
   // The audiobooks the signed-in person has made, with their books.
   '/me/audiobooks': { OPTIONS: preflight, GET: (req) => {
-    const me = accounts.user(req);
+    const me = userOf(req);
     if (!me) return send({ error: 'Not signed in.' }, 401);
     return send(generationsBy(me.id).map((g) => ({ ...versionJson(g), book: g.book_id, title: g.title, author: g.author, cover: g.cover })));
   } },
@@ -110,7 +128,7 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
       if (!book) return send({ error: 'No such book.' }, 404);
       const versions = generationsOf(book.id);
       // Asked for under an edition's id, the page keeps that id; everything it shows is the book's.
-      return send({ book: { ...bookJson(book, versions.filter((v) => v.status === 'ready').length), id: req.params.id }, versions: versions.map(versionJson) });
+      return send({ book: { ...bookJson(book, versions.filter((v) => v.status === 'ready' && v.done > 0).length), id: req.params.id }, versions: versions.map(versionJson) });
     } catch (e) { return fail(e); }
   } },
 
@@ -139,9 +157,11 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     } catch (e) { return fail(e); }
   } },
 
-  // The upload is the request body; what to make of it is in the query.
+  // Making an audiobook prepares it: the upload (the request body) or the download (`source`) is
+  // split into chapters, and its first is narrated; the rest wait to be asked for. What to make
+  // of it is in the query.
   '/books/:id/generations': { OPTIONS: preflight, POST: async (req) => {
-    const me = accounts.user(req);
+    const me = userOf(req);
     if (!me) return signInRequired();
     const q = new URL(req.url).searchParams;
     let name = q.get('name') ?? '';
@@ -171,7 +191,7 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
           const bytes = new Uint8Array(await req.arrayBuffer());
           const chapters = await parseBook(name, bytes);
           db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(createHash('sha256').update(bytes).digest('hex'), admitted.id);
-          enqueue(admitted.id, { chapters });
+          prepared(admitted.id, chapters);
         } finally { uploading--; }
       }
       return send({ ok: true, id: String(admitted.id) }, 202);
@@ -181,11 +201,42 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     }
   } },
 
-  '/generations/:id': { OPTIONS: preflight, GET: (req) => {
-    const g = getGeneration(Number(req.params.id));
-    if (!g) return send({ error: 'No such audiobook.' }, 404);
-    const book = db.query('SELECT * FROM books WHERE id = ?').get(g.book_id) as BookRow;
-    return send({ ...versionJson(g), book: bookJson(book, 0), tracks: tracksOf(g.id).map((t) => ({ idx: t.idx, title: t.title, src: `/audio/${t.file}` })) });
+  // A version, its chapters and its narrated tracks. Asked with an account: how many chapters it has
+  // waiting or narrating (`mine`, of `limit`), and whether it made this one (`owner`, who may delete it).
+  '/generations/:id': {
+    OPTIONS: preflight,
+    GET: (req) => {
+      const g = getGeneration(Number(req.params.id));
+      if (!g) return send({ error: 'No such audiobook.' }, 404);
+      const book = db.query('SELECT * FROM books WHERE id = ?').get(g.book_id) as BookRow;
+      const me = userOf(req), owner = (g as GenerationRow & { user_id?: number | null }).user_id;
+      return send({ ...versionJson(g), book: bookJson(book, 0), chapters: chaptersJson(g),
+        tracks: tracksOf(g.id).map((t) => ({ idx: t.idx, title: t.title, src: `/audio/${t.file}` })),
+        signedIn: me != null, mine: me ? activeFor(me.id) : 0, limit: MAX_ACTIVE, owner: me != null && owner === me.id });
+    },
+    // Only the account that made a version may delete it; its audio goes with it.
+    DELETE: async (req) => {
+      const me = userOf(req);
+      if (!me) return signInRequired('delete an audiobook');
+      const g = getGeneration(Number(req.params.id)) as (GenerationRow & { user_id?: number | null }) | null;
+      if (!g) return send({ error: 'No such audiobook.' }, 404);
+      if (g.user_id !== me.id) return send({ error: 'Only the person who made this audiobook can delete it.' }, 403);
+      try { await removeGeneration(g.id); return send({ ok: true }); } catch (e) { return fail(e, 500); }
+    },
+  },
+
+  // Narrate one chapter of a version: anyone signed in may ask, up to MAX_ACTIVE at once.
+  '/generations/:id/chapters/:idx': { OPTIONS: preflight, POST: (req) => {
+    const me = userOf(req);
+    if (!me) return signInRequired('narrate a chapter');
+    const id = Number(req.params.id), idx = Number(req.params.idx);
+    if (!Number.isSafeInteger(id) || !Number.isSafeInteger(idx) || idx < 0) return send({ error: 'No such chapter.' }, 404);
+    try {
+      const status = requestChapter(id, idx, me.id);
+      return send({ ok: true, status, mine: activeFor(me.id), limit: MAX_ACTIVE }, status === 'queued' ? 202 : 200);
+    } catch (e) {
+      return fail(e, e instanceof Refused ? e.status : e instanceof QueueFull ? 429 : 500);
+    }
   } },
 
   // Audio files with byte ranges, so players can seek and stream.

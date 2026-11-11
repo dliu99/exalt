@@ -56,6 +56,23 @@ for (const [name, type] of [['bytes', 'INTEGER NOT NULL DEFAULT 0'], ['storage',
     db.run(`ALTER TABLE tracks ADD COLUMN ${name} ${type}`);
 }
 db.run('CREATE INDEX IF NOT EXISTS generations_status ON generations(status)');
+// A version's chapters, narrated one at a time when someone asks (jobs.ts). Each keeps its text
+// until it is narrated; then only its audio (`tracks`) is kept. Versions made before this kept no
+// text once done, so a chapter of theirs that never got audio is `unavailable`.
+db.run(`CREATE TABLE IF NOT EXISTS chapters (
+  generation_id INTEGER NOT NULL REFERENCES generations(id),
+  idx INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  text TEXT,                              -- NULL once narrated (or never kept)
+  status TEXT NOT NULL,                   -- idle | queued | working | ready | failed | unavailable
+  requested_by INTEGER,                   -- the account whose Generate it was, for its limit
+  requested_at INTEGER NOT NULL DEFAULT 0,
+  parts_done INTEGER NOT NULL DEFAULT 0,  -- speech requests answered, while narrating
+  parts_total INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (generation_id, idx)
+)`);
+db.run('CREATE INDEX IF NOT EXISTS chapters_status ON chapters(status, requested_at)');
 db.run('CREATE INDEX IF NOT EXISTS tracks_file ON tracks(file)');
 
 // Every name a book goes by: provider ids (`gb-…`, `hc-…`, `OL…W`), its editions' ISBNs
@@ -72,6 +89,10 @@ export type GenerationRow = {
   source_ref?: string; source_hash?: string; status: string; done: number; total: number; error: string; created_at: number;
 };
 export type TrackRow = { generation_id: number; idx: number; title: string; file: string; bytes: number; storage: string };
+export type ChapterRow = {
+  generation_id: number; idx: number; title: string; text: string | null; status: string; requested_by: number | null;
+  requested_at: number; parts_done: number; parts_total: number; error: string;
+};
 
 export const upsertBook = (b: BookRow) =>
   db.query(`INSERT INTO books (id, title, author, year, cover, description) VALUES (?, ?, ?, ?, ?, ?)
@@ -88,15 +109,22 @@ export const getGeneration = (id: number) => db.query('SELECT * FROM generations
 export const tracksOf = (generationId: number) =>
   db.query('SELECT * FROM tracks WHERE generation_id = ? ORDER BY idx').all(generationId) as TrackRow[];
 
+// A version's chapters, without their text.
+export const chaptersOf = (generationId: number) => db.query(`SELECT generation_id, idx, title, NULL AS text, status, requested_by,
+  requested_at, parts_done, parts_total, error FROM chapters WHERE generation_id = ? ORDER BY idx`).all(generationId) as ChapterRow[];
+
+// A version with something to play: prepared, and at least one chapter narrated.
+const PLAYABLE = "g.status = 'ready' AND g.done > 0";
+
 // Books someone has made an audiobook of, newest activity first.
 export const booksWithAudio = () => db.query(`SELECT b.*, COUNT(g.id) AS versions, MAX(g.id) AS latest
-  FROM books b JOIN generations g ON g.book_id = b.id AND g.status = 'ready'
+  FROM books b JOIN generations g ON g.book_id = b.id AND ${PLAYABLE}
   GROUP BY b.id ORDER BY latest DESC`).all() as (BookRow & { versions: number })[];
 
 export const readyCounts = (ids: string[]) => {
   if (ids.length === 0) return new Map<string, number>();
-  const rows = db.query(`SELECT book_id, COUNT(*) AS n FROM generations WHERE status = 'ready'
-    AND book_id IN (${ids.map(() => '?').join(',')}) GROUP BY book_id`).all(...ids) as { book_id: string; n: number }[];
+  const rows = db.query(`SELECT g.book_id, COUNT(*) AS n FROM generations g WHERE ${PLAYABLE}
+    AND g.book_id IN (${ids.map(() => '?').join(',')}) GROUP BY g.book_id`).all(...ids) as { book_id: string; n: number }[];
   return new Map(rows.map((r) => [r.book_id, r.n]));
 };
 
@@ -128,9 +156,9 @@ export const mergeBooks = db.transaction((keep: string, drop: string) => {
 export const allBooksByAudio = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM generations g WHERE g.book_id = b.id) AS made
   FROM books b ORDER BY made DESC, b.rowid`).all() as (BookRow & { made: number })[];
 
-// Every saved book with how many audiobooks of it are ready (search matches words in JS, where
+// Every saved book with how many audiobooks of it can be played (search matches words in JS, where
 // "anti-oedipus" and "Anti–Oedipus" normalize alike).
-export const savedBooks = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM generations g WHERE g.book_id = b.id AND g.status = 'ready') AS versions
+export const savedBooks = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM generations g WHERE g.book_id = b.id AND ${PLAYABLE}) AS versions
   FROM books b`).all() as (BookRow & { versions: number })[];
 
 // What one person has made, newest first, each with its book.
