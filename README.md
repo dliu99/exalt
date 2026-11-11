@@ -10,6 +10,10 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
   every chapter not yet narrated. Anyone signed in may press it, with at most three chapters
   waiting or narrating per account at once. Each narrated chapter is one stored audio file, kept
   for everyone.
+- **A book's page** puts its one action in the dock on a phone, beside Back: **Play** once a
+  version has a narrated chapter, **Generate** until then. Generate opens **Import**, where the
+  book comes from: upload an EPUB, PDF or TXT, pick a copy the server can download, or search
+  LibGen, Z-Library or the web in the browser to download it and upload it.
 - **Listen.** A book's page shows a sample (the first narrated chapter of its first
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
   plays narrated chapters in order and stops at one that isn't narrated yet, offering to
@@ -24,7 +28,7 @@ domain or that they hold the rights to share it.
 
 | Path | What it is |
 | --- | --- |
-| `app.contract` | The screens: library and search, book, new audiobook sheet, player |
+| `app.contract` | The screens: library and search, book, Import, player |
 | `app.ts` | The app's data module: talks to the server |
 | `app.test.contract` | Tests, run against the server in offline mode |
 | `server/index.ts` | Bun HTTP server: catalog, uploads, audio with byte ranges |
@@ -92,7 +96,7 @@ offline server: `bun exact.mjs test web`.
 
 LibGen is enabled by default, with no account or API key. Search includes its EPUB/PDF
 results alongside the metadata catalog; `BOOK_PROVIDER=libgen` searches it alone. On a
-book's **New Audiobook** sheet, choose a file under **Download**, select a voice, confirm
+book's **Import** page, choose a file under **Download**, select a voice, confirm
 sharing rights and press **Make**. The server responds with a generation ID immediately
 (`202`); the worker downloads and verifies the file, splits it into chapters and narrates the
 first. Source failures appear on the book's generation status. Uploads remain available.
@@ -235,7 +239,7 @@ is found or Z-Library is disconnected.
 
 The session belongs to the server: every signed-in creator uses that account's download
 allowance. Expired sessions, quota limits and unavailable downloads return an error on the
-creation sheet. No download happens until the creator confirms Make. Files are limited to
+Import page. No download happens until the creator confirms Make. Files are limited to
 50 MiB for processing. If your domain serves downloads through another trusted HTTPS origin, list its
 exact origin in `ZLIBRARY_DOWNLOAD_ORIGINS` (comma-separated); redirects are checked and
 session credentials are sent only to `ZLIBRARY_BASE_URL`.
@@ -243,7 +247,7 @@ session credentials are sent only to `ZLIBRARY_BASE_URL`.
 ## Accounts
 
 Sign in with Google, as `../exact/docs/recipes/sign-in.md` describes. The app shows Google's own
-button on the lander, Home and the New Audiobook sheet (`server/auth.ts` can also check Apple's
+button on the lander, Home, Import and the player (`server/auth.ts` can also check Apple's
 tokens, but the app offers no Apple button for now). It asks the server for a single-use nonce, and
 the provider signs an ID token over that nonce. `server/auth.ts` checks the token's signature
 against the provider's published keys, along with its issuer, audience, expiry and nonce. Then it

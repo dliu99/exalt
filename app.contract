@@ -19,7 +19,7 @@ routes nav
       explore "/explore"
       voices "/voices"
       book "/book/:id"
-        create "/book/:id/create"
+        create "/book/:id/import"
       play "/play/:gen"
 
 shape Book
@@ -193,6 +193,10 @@ fn byline(b: Book): string = b.year > 0 ? `${b.author} · ${b.year}` : b.author
 fn versionsText(n: number): string = n == 0 ? "" : n == 1 ? "1 audiobook" : `${n} audiobooks`
 fn statusText(v: Version): string = v.status == "ready" ? (v.active > 0 ? `${chaptersText(v.done, v.total)} · narrating` : chaptersText(v.done, v.total)) : v.status == "failed" ? v.error : v.status == "queued" ? "Waiting to start…" : "Preparing book…"
 fn goodreads(b: Book): string = `https://www.goodreads.com/search?q=${encodeURIComponent(b.title + " " + b.author)}`
+// Import's "find it yourself": a book's title and author searched in the browser, to download and upload.
+fn libgenSearch(b: Book): string = `https://libgen.li/index.php?req=${encodeURIComponent(b.title + " " + b.author)}`
+fn zlibSearch(b: Book): string = `https://z-library.sk/s/${encodeURIComponent(b.title + " " + b.author)}`
+fn webSearch(b: Book): string = `https://www.google.com/search?q=${encodeURIComponent(b.title + " " + b.author + " epub")}`
 fn trackTitle(a: Audiobook, i: number): string = match a.chapters.at(i) { case some(t) => t.title, case none => "" }
 fn trackSrc(a: Audiobook, i: number): string = match a.chapters.at(i) { case some(t) => t.src, case none => "" }
 fn trackStatus(a: Audiobook, i: number): string = match a.chapters.at(i) { case some(t) => t.status, case none => "" }
@@ -314,6 +318,11 @@ component App
   derive working = detail.versions.filter(v => inFlight(v.status) or v.active > 0).length > 0
   // The versions with something to play: prepared, with a chapter narrated.
   derive playable = detail.versions.filter(v => v.status == "ready" and v.done > 0)
+  // The book page's one action, in the dock on a phone: Play when a version has a narrated chapter
+  // (the one last heard here, else the first), Generate (Import) when none has.
+  derive bookPlaying = detail.book.id == bookId and playable.length > 0
+  derive heardHere = places.filter(p => playable.filter(v => v.id == p.gen).length > 0)
+  derive bookGen = match first(heardHere) { case some(p) => p.gen, case none => match first(playable) { case some(v) => v.id, case none => "" } }
   // The player's version is being prepared, or has chapters waiting or narrating.
   derive narrating = inFlight(audiobook.status) or audiobook.chapters.filter(c => inFlight(c.status)).length > 0
   // The listener has as many chapters narrating as they may.
@@ -477,6 +486,11 @@ component App
     nav = go(nav, path("explore"))
   action follow(url: string)
     nav = go(nav, url)
+  action bookAction
+    if bookPlaying
+      listen(bookGen)
+    else
+      openCreate()
   action openCreate
     sourceId = ""
     filePath = ""
@@ -890,26 +904,25 @@ component App
                   progress aria-label="Loading" testId="book-loading"
               else
                 view height="env(safe-area-inset-top)" flex-shrink=0
-                column margin="0 auto" width="100%" max-width=1000 box-sizing="border-box" padding=(wide ? "128px 48px 96px" : "64px 20px 200px") gap=(wide ? 56 : 36)
+                column margin="0 auto" width="100%" max-width=1000 box-sizing="border-box" padding=(wide ? "104px 48px 96px" : "64px 20px 200px") gap=(wide ? 32 : 36)
+                  if wide
+                    button press=back aria-label="Back" testId="book-back" class=Chip align-self="flex-start" margin-left=-12 -exact-press-opacity=0.6
+                      image "symbol:back" color="#14171f" font="-exact-subheadline"
+                      text "Back" font-family="Jost" font-size="0.9375rem" color="#14171f"
                   view display="flex" flex-direction=(wide ? "row" : "column") gap=(wide ? 56 : 28) align-items=(wide ? "flex-start" : "center")
                     view animation=(still ? "none" : "arrive 800ms cubic-bezier(.2,.7,.2,1) both")
                       BookCover(src=detail.book.cover, title=detail.book.title, w=(wide ? 260 : 190))
                     column flex=1 min-width=0 gap=18 align-items=(wide ? "flex-start" : "center")
                       column gap=10 align-items=(wide ? "flex-start" : "center")
-                        text detail.book.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? "2.875rem" : "min(-exact-large-title, 48px)") line-height=1.5 letter-spacing="-0.02em" color="#14171f" text-align=(wide ? "start" : "center") testId="book-title"
+                        if wide
+                          text detail.book.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="2.875rem" line-height=1.5 letter-spacing="-0.02em" color="#14171f" text-align=(wide ? "start" : "center") testId="book-title"
+                        else
+                          text detail.book.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="min(-exact-large-title, 48px)" line-height=1.5 letter-spacing="-0.02em" color="#14171f" text-align=(wide ? "start" : "center") testId="book-title"
                         text (detail.book.year > 0 ? `${detail.book.author.toUpperCase()} · ${detail.book.year}` : detail.book.author.toUpperCase()) font-family="Jost" font-weight=500 font-size="0.75rem" line-height=1.5 letter-spacing="0.24em" color="#4a4f5c" text-align=(wide ? "start" : "center")
                       row gap=10 align-items="center" flex-wrap="wrap" justify-content=(wide ? "flex-start" : "center") padding-top=6
-                        for v in playable.slice(0, 1) key=v.id
-                          button press=listen(v.id) testId="listen" class=Pill
-                            image "symbol:play-fill" color="#f4f2ec" width=14 height=14
-                            text "Listen" font-family="Jost" font-weight=500 font-size="1rem" color="#f4f2ec"
-                        if playable.length == 0
-                          button press=openCreate testId="make" class=Pill
-                            image "symbol:sparkles" color="#f4f2ec" width=15 height=15
-                            text "Make the audiobook" font-family="Jost" font-weight=500 font-size="1rem" color="#f4f2ec"
-                        else
-                          button press=openCreate aria-label="Make another" testId="make" class=Round width=50 height=50 backgroundMaterial="glass"
-                            image "symbol:add" color="#14171f" width=16 height=16
+                        // A phone has Play or Generate in the dock; a wide screen has it here.
+                        if wide
+                          BookAction(playing=bookPlaying, press=bookAction)
                         link href=goodreads(detail.book) testId="goodreads" class=Chip height=50 backgroundMaterial="glass"
                           text "Goodreads" font-family="Jost" font-size=15 color="#14171f"
                       if detail.book.description != ""
@@ -922,21 +935,38 @@ component App
                       column
                         for v in detail.versions key=v.id
                           VersionRow(version=v, listen=listen)
+                    if playable.length > 0
+                      button press=openCreate appearance="none" testId="make-another" align-self="flex-start" display="flex" align-items="center" gap=8 padding="6px 0" cursor="pointer" -exact-press-opacity=0.6
+                        image "symbol:add" color="#14171f" font="-exact-subheadline"
+                        text "Make another audiobook" font-family="Jost" font-size="0.9375rem" color="#14171f" border-bottom="1px solid rgba(20,23,31,0.3)" padding-bottom=2
             if wide
               TopBar(active="")
-            else
-              button press=back aria-label="Back" testId="book-back" class=Round backgroundMaterial="glass" position="absolute" top="calc(env(safe-area-inset-top) + 8px)" left=16 z-index=5
-                image "symbol:back" color="#14171f" width=18 height=18
-        // Making an audiobook: signed out, only the way in; signed in, the file, the voice and the consent.
+        // Import: where a book comes from before it is narrated. Anyone can search for it in the
+        // browser; signed in, upload it or pick a download, then the voice and the consent.
         if e.name == "create"
-          column navigationKey=`${e.id}` navigationBar="none" navigationPresentation="modal" navigationScroll="create-form" position="absolute" inset=0 background-color="#eceef2" testId="create"
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="create-form" position="absolute" inset=0 background-color="#eceef2" testId="create"
             scroll id="create-form" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=640 box-sizing="border-box" padding=(wide ? "104px 48px 96px" : "80px 20px 72px") gap=(wide ? 44 : 36)
                 row gap=20 align-items="center"
                   BookCover(src=detail.book.cover, title=detail.book.title, w=(wide ? 72 : 60))
                   column flex=1 min-width=0 gap=6
-                    text "New audiobook" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? "2.5rem" : "min(-exact-title1, 40px)") line-height=1.5 letter-spacing="-0.02em" color="#14171f"
+                    if wide
+                      text "Import" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="2.5rem" line-height=1.5 letter-spacing="-0.02em" color="#14171f"
+                    else
+                      text "Import" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="min(-exact-title1, 40px)" line-height=1.5 letter-spacing="-0.02em" color="#14171f"
                     text detail.book.title font-family="Jost" font-size="0.9375rem" color="#4a4f5c" line-clamp=1
+                // Find it yourself: the browser searches for the book; what it downloads is uploaded below.
+                column gap=14 testId="find"
+                  SectionTitle(label="Find the book")
+                  text "Search for an EPUB or PDF, download it, then upload it here." font-family="Jost" font-size="0.9375rem" line-height=1.45 color="#4a4f5c"
+                  row gap=10 flex-wrap="wrap"
+                    link href=libgenSearch(detail.book) testId="find-libgen" display="flex" align-items="center" gap=8 min-height=42 padding="8px 18px" box-sizing="border-box" border-radius=999 backgroundMaterial="glass" -exact-press-scale=0.95 -exact-press-haptic="selection"
+                      text "LibGen" font-family="Jost" font-size="0.9375rem" color="#14171f"
+                    link href=zlibSearch(detail.book) testId="find-zlibrary" display="flex" align-items="center" gap=8 min-height=42 padding="8px 18px" box-sizing="border-box" border-radius=999 backgroundMaterial="glass" -exact-press-scale=0.95 -exact-press-haptic="selection"
+                      text "Z-Library" font-family="Jost" font-size="0.9375rem" color="#14171f"
+                    link href=webSearch(detail.book) testId="find-web" display="flex" align-items="center" gap=8 min-height=42 padding="8px 18px" box-sizing="border-box" border-radius=999 backgroundMaterial="glass" -exact-press-scale=0.95 -exact-press-haptic="selection"
+                      image "symbol:search" color="#14171f" font="-exact-subheadline"
+                      text "Search the web" font-family="Jost" font-size="0.9375rem" color="#14171f"
                 if not account.signedIn
                   column gap=14 align-items="flex-start" max-width=360 testId="create-signed-out"
                     text "Sign in to make an audiobook. Listening needs no account." font-family="Jost" font-weight=300 font-size="1.25rem" color="#14171f" line-height=1.45 testId="sign-in-note"
@@ -947,6 +977,7 @@ component App
                 else
                   column gap=14
                     SectionTitle(label="Book file")
+                    text "Upload the file, or pick a copy the server can download." font-family="Jost" font-size="0.9375rem" line-height=1.45 color="#4a4f5c"
                     if pending(bookSources)
                       row gap=12 align-items="center"
                         progress aria-label="Finding book files"
@@ -1015,9 +1046,9 @@ component App
                       text "Sign out" font-family="Jost" font-size="0.875rem" color="#4a4f5c" border-bottom="1px solid rgba(20,23,31,0.2)" padding-bottom=2
             header display="flex" align-items="center" padding=(wide ? "22px 7vw" : "14px 20px") position="absolute" top=0 left=0 right=0 z-index=5
               appearance="none" background-color="rgba(236,238,242,0.72)" backdrop-filter="blur(14px)" border-bottom="1px solid rgba(20,23,31,0.06)"
-              button id="back" press=back appearance="none" aria-label="Cancel" testId="create-cancel" padding="6px 0" display="flex" align-items="center" gap=8 cursor="pointer"
-                image "symbol:close" color="#14171f" width=16 height=16
-                text "Cancel" font-family="Jost" font-size="min(-exact-subheadline, 20px)" color="#14171f"
+              button id="back" press=back appearance="none" aria-label="Back" testId="create-cancel" padding="6px 0" display="flex" align-items="center" gap=8 cursor="pointer"
+                image "symbol:back" color="#14171f" width=16 height=16
+                text "Back" font-family="Jost" font-size="min(-exact-subheadline, 20px)" color="#14171f"
               view flex=1
               text "EXALT" font-family="Jost" font-weight=500 font-size="min(-exact-footnote, 18px)" letter-spacing="0.5em" color="#14171f"
         // The player, in the dark: the cover lights the room, and the controls float on glass.
@@ -1043,7 +1074,10 @@ component App
                       scale=(held ? 0.92 : 1) transition="scale 500ms cubic-bezier(.2,.9,.3,1.15)"
                       BookCover(src=audiobook.cover, title=audiobook.title, w=playerCover)
                     column align-items="center" gap=8
-                      text audiobook.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? "2rem" : "min(-exact-title1, 40px)") line-height=1.5 color="#eeebe4" text-align="center"
+                      if wide
+                        text audiobook.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="2rem" line-height=1.5 color="#eeebe4" text-align="center"
+                      else
+                        text audiobook.title role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="min(-exact-title1, 40px)" line-height=1.5 color="#eeebe4" text-align="center"
                       text audiobook.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="#b5b2aa" text-align="center"
                       text trackTitle(audiobook, track) font-family="Jost" font-size="0.9375rem" color="#d6d3cb" text-align="center" line-height=1.4 line-clamp=2 padding-top=8 testId="now-playing"
                   // Being prepared, or couldn't be: no chapters yet.
@@ -1153,7 +1187,7 @@ component App
       if docked
         column position="absolute" left=0 right=0 bottom=0 align-items="center" gap=10 pointer-events="none" z-index=20 testId="dock"
           padding="0 16px clamp(14px, calc(env(safe-area-inset-bottom) - 8px), 40px)"
-          for p in (top(nav).name == "home" ? [] : places.slice(0, 1)) key=p.gen
+          for p in (top(nav).name == "home" or top(nav).name == "book" ? [] : places.slice(0, 1)) key=p.gen
             button press=resume(p) appearance="none" aria-label=`Resume ${p.title}` testId="mini" pointer-events="auto" text-align="start" cursor="pointer"
               width="100%" max-width=370 box-sizing="border-box" display="flex" align-items="center" gap=12 padding="8px 10px 8px 8px" border-radius=999
               backgroundMaterial="glass" class=Lift -exact-press-scale=0.97 -exact-press-haptic="impact-light"
@@ -1166,10 +1200,21 @@ component App
                 text `Chapter ${p.track + 1} of ${p.tracks}` font-family="Jost" font-size=12 color="#6b7080" line-clamp=1
               view width=38 height=38 border-radius=999 background-color="#14171f" display="flex" align-items="center" justify-content="center" flex-shrink=0
                 image "symbol:play-fill" color="#f4f2ec" width=13 height=13
-          row padding=5 gap=2 border-radius=999 backgroundMaterial="glass" class=Lift pointer-events="auto" role="navigation"
-            DockTab(to=path("home"), id="nav-home", label="Home", symbol=(top(nav).name == "home" ? "symbol:home-fill" : "symbol:home"), on=(top(nav).name == "home"))
-            DockTab(to=path("explore"), id="nav-explore", label="Explore", symbol="symbol:search", on=(top(nav).name == "explore"))
-            DockTab(to=path("voices"), id="nav-voices", label="Voices", symbol="symbol:waveform", on=(top(nav).name == "voices"))
+          // On a book's page the tabs give way: back on the left, the book's Play or Generate on the right.
+          if top(nav).name == "book"
+            row width="100%" max-width=370 box-sizing="border-box" align-items="center" gap=10 pointer-events="auto" role="toolbar" aria-label="Book" testId="book-bar"
+              animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+              button press=back aria-label="Back" testId="dock-back" class=Round width=52 height=52 backgroundMaterial="glass" box-shadow="0 12px 30px -14px rgba(20,24,36,0.32)"
+                image "symbol:back" color="#14171f" width=18 height=18
+              view flex=1
+              if detail.book.id == bookId
+                BookAction(playing=bookPlaying, press=bookAction)
+          else
+            row padding=5 gap=2 border-radius=999 backgroundMaterial="glass" class=Lift pointer-events="auto" role="navigation"
+              animation=(still ? "none" : "dockIn 420ms cubic-bezier(.2,.9,.3,1.1) both")
+              DockTab(to=path("home"), id="nav-home", label="Home", symbol=(top(nav).name == "home" ? "symbol:home-fill" : "symbol:home"), on=(top(nav).name == "home"))
+              DockTab(to=path("explore"), id="nav-explore", label="Explore", symbol="symbol:search", on=(top(nav).name == "explore"))
+              DockTab(to=path("voices"), id="nav-voices", label="Voices", symbol="symbol:waveform", on=(top(nav).name == "voices"))
 
 // What floats: a capsule to press, a round button, the ink pill of a screen's one main action.
 style Chip
@@ -1190,6 +1235,25 @@ component Mist
     view position="absolute" top=0 left=0 right=0 height=300 overflow="hidden" pointer-events="none"
       image "assets/lander.jpg" alt="" position="absolute" top=0 left=0 width="100%" height="100%" object-fit="cover" opacity=0.75
       view position="absolute" inset=0 background-image="linear-gradient(180deg, rgba(236,238,242,0.35) 0%, rgba(236,238,242,0.75) 55%, #eceef2 100%)"
+
+// A book's one action, in ink on glass: Play once it has a narrated chapter, Generate (to Import)
+// until then. Its words swap in place when the book gains its first chapter.
+component BookAction
+  props
+    playing: bool
+    press: action
+  view
+    button press=press appearance="none" testId=(playing ? "listen" : "make") aria-label=(playing ? "Play" : "Generate")
+      display="flex" align-items="center" justify-content="center" min-height=52 padding="10px 26px" box-sizing="border-box" border-radius=999 background-color="#14171f" cursor="pointer"
+      box-shadow="0 14px 30px -12px rgba(20,23,31,0.55)" transition="background-color 300ms ease" -exact-press-scale=0.95 -exact-press-haptic="impact-medium"
+      if playing
+        row gap=10 align-items="center" animation="inkIn 320ms cubic-bezier(.2,.7,.2,1) both"
+          image "symbol:play-fill" color="#f4f2ec" width=15 height=15
+          text "Play" font-family="Jost" font-weight=500 font-size="min(-exact-callout, 22px)" color="#f4f2ec"
+      else
+        row gap=10 align-items="center" animation="inkIn 320ms cubic-bezier(.2,.7,.2,1) both"
+          image "symbol:sparkles" color="#f4f2ec" width=16 height=16
+          text "Generate" font-family="Jost" font-weight=500 font-size="min(-exact-callout, 22px)" color="#f4f2ec"
 
 component DockTab
   props
@@ -1446,6 +1510,9 @@ keyframes arrive
   from opacity=0 translate="0px 40px"
 keyframes inkIn
   from opacity=0 translate="0px 10px"
+// The dock changing what it holds: it gathers in from below, as a glass bar does.
+keyframes dockIn
+  from opacity=0 scale=0.9 translate="0px 14px"
 keyframes drift
   50% translate="6% -2%"
 

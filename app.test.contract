@@ -170,6 +170,48 @@ test "a search settles to its books, and the field clears"
   expect state asked == ""
   expect tree missing "book-OL2W"
 
+// On a phone, a book's page turns the dock into its own bar: back, and Play or Generate.
+test "a book with no audiobook shows back and Generate in the dock, and back returns"
+  size 390x844
+  tap "enter"
+  tap "nav-explore"
+  type "search" "rivers"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL2W"
+  clock data
+  expect tree has "book-bar"
+  expect tree has "dock-back"
+  expect tree has "make"
+  expect tree missing "listen"
+  expect tree missing "nav-home"
+  expect tree missing "book-back"
+  tap "dock-back"
+  clock settle
+  expect tree has "explore"
+  expect tree has "nav-home"
+  expect tree missing "book-bar"
+
+test "Generate opens Import, with searches for the book in the browser"
+  size 390x844
+  tap "enter"
+  tap "nav-explore"
+  type "search" "rivers"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL2W"
+  clock data
+  tap "make"
+  clock data
+  expect tree has "create"
+  expect tree has "find-libgen"
+  expect tree has "find-zlibrary"
+  expect tree has "find-web"
+  expect tree has "create-signed-out"
+  tap "create-cancel"
+  clock settle
+  expect text "book-title" == "Notes on Rivers"
+
 // Chapters, narrated one at a time. These run after the tests above, on the same server: the
 // driver makes a version as a persona (`as ada`, which only the offline server takes), version 1.
 test "a version lists its chapters: the first narrated, the others waiting for Generate"
@@ -266,3 +308,20 @@ test "at a chapter that isn't narrated the player stops and offers Generate, and
   expect tree has "audio"
   expect tree has "toggle"
   expect tree missing "generate-1"
+
+test "once a chapter is narrated the dock plays the book"
+  size 390x844
+  tap "enter"
+  tap "nav-explore"
+  type "search" "harbour"
+  type "search" key "Enter"
+  clock data
+  tap "book-OL1W"
+  clock data
+  expect tree has "listen"
+  expect tree missing "make"
+  expect tree has "make-another"
+  tap "listen"
+  clock data
+  expect tree has "player"
+  expect text "now-playing" == "Chapter One: The Harbour"

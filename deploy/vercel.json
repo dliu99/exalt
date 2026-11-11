@@ -6,7 +6,7 @@
     { "source": "/explore", "destination": "/shell.html" },
     { "source": "/voices", "destination": "/shell.html" },
     { "source": "/book/:id", "destination": "/shell.html" },
-    { "source": "/book/:id/create", "destination": "/shell.html" },
+    { "source": "/book/:id/import", "destination": "/shell.html" },
     { "source": "/play/:gen", "destination": "/shell.html" }
   ],
   "headers": [
