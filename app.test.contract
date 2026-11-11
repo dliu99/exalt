@@ -47,22 +47,26 @@ test "search finds a book and opens its page"
   expect tree has "goodreads"
   expect tree missing "book-description"
 
-test "making an audiobook waits for a file and consent"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "harbour"
-  type "search" key "Enter"
+test "Import is the form for anyone: the book's searches, its file, a voice and consent"
+  at "/book/OL1W/import"
   clock data
-  tap "book-OL1W"
-  clock data
-  expect text "book-description" == "A test book about a harbour."
-  tap "make"
-  clock data
-  expect state model == "exalt/silence"
+  expect tree has "create"
+  expect tree has "find-libgen"
+  expect tree has "find-zlibrary"
+  expect tree has "find-web"
+  expect tree has "choose-file"
+  expect tree has "model"
+  expect tree has "rights"
+  expect tree missing "account"
   expect state rights == false
   expect state canCreate == false
+  expect disabled "create-save"
+  tap "create-cancel"
+  clock data
+  expect text "book-title" == "A Quiet Harbour"
 
-test "making an audiobook asks for an account, with Google's button"
+test "signed out, Generate opens the sheet to log in or sign up, and stays on the book"
+  size 390x844
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -70,20 +74,11 @@ test "making an audiobook asks for an account, with Google's button"
   clock data
   tap "book-OL1W"
   clock data
+  expect state pendingAuth == ""
   tap "make"
-  clock data
-  expect tree has "sign-in-note"
-  expect tree missing "apple-sign-in"
-  expect tree has "google-sign-in"
-  expect text "sign-in-note" == "Sign in to make an audiobook. Listening needs no account."
-  expect tree missing "account"
-  expect tree missing "sign-out"
-  expect tree missing "model"
-  expect tree missing "rights"
-  expect tree missing "create-save"
-  clock settle
-  tap "create-cancel"
-  clock settle
+  expect tree has "account-site-google"
+  expect state pendingAuth == "import"
+  expect tree missing "create"
   expect text "book-title" == "A Quiet Harbour"
 
 test "typing suggests books under the field, and one opens its page"
@@ -139,7 +134,8 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
   expect tree has "home"
 
-test "signed out, making an audiobook shows only the sign-in, not the form"
+test "closing the sheet without signing in carries nothing on"
+  size 390x844
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -148,12 +144,11 @@ test "signed out, making an audiobook shows only the sign-in, not the form"
   tap "book-OL1W"
   clock data
   tap "make"
-  clock data
-  expect tree has "create-signed-out"
-  expect tree missing "book-source"
-  expect tree missing "choose-file"
-  expect tree missing "me"
-  expect tree missing "create-hint"
+  expect state pendingAuth == "import"
+  back
+  clock settle
+  expect state pendingAuth == ""
+  expect text "book-title" == "A Quiet Harbour"
 
 test "a search settles to its books, and the field clears"
   tap "enter"
@@ -192,28 +187,6 @@ test "a book with no audiobook shows back and Generate in the dock, and back ret
   expect tree has "nav-home"
   expect tree missing "book-bar"
 
-test "Generate opens Import, with searches for the book in the browser"
-  size 390x844
-  tap "enter"
-  tap "nav-explore"
-  type "search" "rivers"
-  type "search" key "Enter"
-  clock data
-  tap "book-OL2W"
-  clock data
-  tap "make"
-  clock data
-  expect tree has "create"
-  expect tree has "find-libgen"
-  expect tree has "find-zlibrary"
-  expect tree has "find-web"
-  expect tree has "create-signed-out"
-  tap "create-cancel"
-  clock settle
-  expect text "book-title" == "Notes on Rivers"
-
-// Chapters, narrated one at a time. These run after the tests above, on the same server: the
-// driver makes a version as a persona (`as ada`, which only the offline server takes), version 1.
 test "a version lists its chapters: the first narrated, the others waiting for Generate"
   request POST "/books/OL1W/generations?source=lg-00000000000000000000000000000001&model=exalt%2Fsilence&rights=1" as ada
   clock +1500 real
@@ -235,7 +208,7 @@ test "a version lists its chapters: the first narrated, the others waiting for G
   expect tree missing "delete"
   expect tree missing "in-progress"
 
-test "signed out, Generate asks for an account"
+test "signed out, a chapter's Generate opens the sheet"
   tap "enter"
   tap "nav-explore"
   type "search" "harbour"
@@ -245,12 +218,12 @@ test "signed out, Generate asks for an account"
   clock data
   tap "version-1"
   clock data
-  expect tree missing "player-sign-in"
+  expect state pendingAuth == ""
   tap "generate-2"
-  expect tree has "player-sign-in"
-  expect tree has "player-google-sign-in"
+  expect tree has "account-site-google"
+  expect state pendingAuth == "chapter"
+  expect state pendingChapter == 2
 
-// The offline voice reads each part of a chapter as a second of silence: chapter one is a second long.
 test "the player's speed, pause, position and skips"
   tap "enter"
   tap "nav-explore"

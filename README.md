@@ -11,8 +11,9 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
   waiting or narrating per account at once. Each narrated chapter is one stored audio file, kept
   for everyone.
 - **A book's page** puts its one action in the dock on a phone, beside Back: **Play** once a
-  version has a narrated chapter, **Generate** until then. Generate opens **Import**, where the
-  book comes from: upload an EPUB, PDF or TXT, pick a copy the server can download, or search
+  version has a narrated chapter, **Generate** until then (signed out, it asks you to sign in
+  first). Below the title are the book's numbers: when it was published, its audiobooks, and how
+  many chapters the first has and has narrated. Generate opens **Import**, where the book comes from: upload an EPUB, PDF or TXT, pick a copy the server can download, or search
   LibGen, Z-Library or the web in the browser to download it and upload it.
 - **Listen.** A book's page shows a sample (the first narrated chapter of its first
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
@@ -246,9 +247,11 @@ session credentials are sent only to `ZLIBRARY_BASE_URL`.
 
 ## Accounts
 
-Sign in with Google, as `../exact/docs/recipes/sign-in.md` describes. The app shows Google's own
-button on the lander, Home, Import and the player (`server/auth.ts` can also check Apple's
-tokens, but the app offers no Apple button for now). It asks the server for a single-use nonce, and
+Sign in with Google, as `../exact/docs/recipes/sign-in.md` describes (and with Apple in the iPhone
+app). The lander has its own way in. Anything else that needs an account (Generate, a chapter's
+Generate, Make) opens one sheet to log in or sign up, then carries on with what was asked; closing
+it carries nothing on. On the web the sheet holds Google's own button, in the iPhone app Continue
+with Apple and Continue with Google. It asks the server for a single-use nonce, and
 the provider signs an ID token over that nonce. `server/auth.ts` checks the token's signature
 against the provider's published keys, along with its issuer, audience, expiry and nonce. Then it
 answers a session token of Exalt's own: the app keeps it in its secret store and sends it as a
