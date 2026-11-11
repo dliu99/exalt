@@ -459,7 +459,8 @@ async function downloadVersion(gen: string, store: Store, storage: Storage): Pro
     const have = new Set(await listDir(storage, dir));
     for (const c of a.chapters) {
       const name = `${c.idx}.${extOf(c.src)}`;
-      if (!c.src || have.has(name)) continue;
+      // Only a chapter narrated in full: one still narrating answers a live stream at the same address.
+      if (!c.src || c.status !== 'ready' || have.has(name)) continue;
       const res = await fetch(c.src, { exactBodyTo: `${dir}/${name}`, exactTimeout: 900000 });
       if (!res.ok) return { ok: false, error: `Chapter ${c.idx + 1} didn’t download. Try again.` };
     }
@@ -481,9 +482,9 @@ async function removeDownload(gen: string, storage: Storage): Promise<Reply> {
     return { ok: false, error: 'The download couldn’t be removed. Try again.' };
   }
 }
-// The chapters this listener asked for ("gen/idx", comma-separated) that have finished: narrated,
-// failed, or gone with their version. Ones still narrating, or out of reach, are left for later
-// (a copy kept offline may be old, so only a status that can't change counts).
+// The chapters this listener asked for ("gen/idx", comma-separated) that can be heard now (a chapter
+// plays from its first narrated part), failed, or went with their version. Ones not started yet, or
+// out of reach, are left for later (a copy kept offline may be old, so only what can't change counts).
 async function chaptersReady(keys: string, store: Store, storage: Storage): Promise<Result<'chaptersReady'>> {
   const asked = keys.split(',').filter(Boolean).map((key) => ({ key, gen: key.split('/')[0], idx: Number(key.split('/')[1]) }));
   const done: Result<'chaptersReady'> = [];
@@ -496,7 +497,7 @@ async function chaptersReady(keys: string, store: Store, storage: Storage): Prom
     for (const k of asked.filter((x) => x.gen === gen)) {
       const c = a?.chapters.find((x) => x.idx === k.idx);
       if (!a || !c) done.push({ key: k.key, gen, idx: k.idx, title: '', book: a?.title ?? '', status: 'gone' });
-      else if (['ready', 'failed', 'unavailable'].includes(c.status)) done.push({ key: k.key, gen, idx: k.idx, title: c.title, book: a.title, status: c.status });
+      else if (c.src || ['ready', 'failed', 'unavailable'].includes(c.status)) done.push({ key: k.key, gen, idx: k.idx, title: c.title, book: a.title, status: c.src ? 'ready' : c.status });
     }
   }
   return done;

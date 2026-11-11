@@ -118,7 +118,8 @@ shape Offline
   idx: number
   path: string
 
-// A chapter this listener asked to have narrated that has finished, or couldn't be (`status`).
+// A chapter this listener asked to have narrated that can be heard now (`ready`: its first part is
+// narrated, so it plays while the rest is), or couldn't be narrated (`status`).
 // `key` is how it was asked for: "gen/idx".
 shape Ready
   key: string
@@ -372,8 +373,9 @@ component App
   derive playSrc = not here ? "" : keptSrc != "" ? keptSrc : trackSrc(audiobook, track)
   // The mini player: whatever is loaded, over every screen but the player (and the door and Import).
   derive miniOn = here and not playerOpen and fore == "" and top(nav).name != "lander" and top(nav).name != "create"
-  derive narratedHere = audiobook.chapters.filter(c => c.src != "").length
-  derive keptHere = audiobook.chapters.filter(c => c.src != "" and keptAt(offline, audiobook.id, c.idx) != "").length
+  // What a download takes: the chapters narrated in full (one still narrating plays as a live stream, not a file).
+  derive narratedHere = audiobook.chapters.filter(c => c.status == "ready" and c.src != "").length
+  derive keptHere = audiobook.chapters.filter(c => c.status == "ready" and c.src != "" and keptAt(offline, audiobook.id, c.idx) != "").length
   derive anyKept = offline.filter(o => o.gen == audiobook.id).length > 0
   derive savingHere = pending(savedAll) and saving == audiobook.id
   // A ready chapter not yet announced.
