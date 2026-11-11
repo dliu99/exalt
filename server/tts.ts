@@ -18,17 +18,27 @@ const DEFAULTS: Model[] = [
 ];
 // Some providers only answer in raw 16-bit PCM.
 const PCM_ONLY = (model: string) => model.startsWith('heygen/');
+// How many parts of a chapter are asked for at once (TTS_PARALLEL, 2 by default). A model that
+// answers 429 is asked one part at a time for the next ten minutes, and nobody asks it again
+// before its `retry-after` has passed.
+const PARALLEL = Number(process.env.TTS_PARALLEL ?? 2);
+if (!Number.isSafeInteger(PARALLEL) || PARALLEL < 1) throw new Error('TTS_PARALLEL must be a positive integer.');
+const pace = new Map<string, { slowUntil: number; waitUntil: number }>();
+const paceOf = (model: string) => pace.get(model) ?? pace.set(model, { slowUntil: 0, waitUntil: 0 }).get(model)!;
+export const partsAtOnce = (model: string) => (Date.now() < (pace.get(model)?.slowUntil ?? 0) ? 1 : PARALLEL);
 
 let known: Model[] | undefined;
 let knownUntil = 0;
 
-// The chosen models, with the voices the provider lists for each (empty: the model picks).
+const pinned = () => (process.env.TTS_MODELS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  .map((s) => { const [id, name] = s.split('='); return { id, name: name ?? id, voices: [] as string[] }; });
+
+// The chosen models, with the voices the provider lists for each (empty: the model picks). The
+// offline server has silence, and with TTS_BASE_URL (a test's own provider) TTS_MODELS too.
 export async function listModels(offline: boolean): Promise<Model[]> {
-  if (offline) return [FAKE];
+  if (offline) return process.env.TTS_BASE_URL ? [FAKE, ...pinned()] : [FAKE];
   if (known && Date.now() < knownUntil) return known;
-  const pinned = (process.env.TTS_MODELS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-    .map((s) => { const [id, name] = s.split('='); return { id, name: name ?? id, voices: [] as string[] }; });
-  const chosen = pinned.length ? pinned : DEFAULTS;
+  const chosen = pinned().length ? pinned() : DEFAULTS;
   let voices = new Map<string, string[]>();
   try {
     const res = await fetch(`${BASE}/models?output_modalities=speech`, { signal: AbortSignal.timeout(6000), headers: KEY ? { authorization: `Bearer ${KEY}` } : {} });
@@ -48,8 +58,10 @@ export async function speak(model: string, voice: string, input: string): Promis
   // A model with a voice list needs one of them; the first is its default.
   if (!voice) voice = (known ?? await listModels(false)).find((m) => m.id === model)?.voices[0] ?? '';
   const pcm = PCM_ONLY(model);
+  const paced = paceOf(model);
   let res: Response | undefined;
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (paced.waitUntil > Date.now()) await Bun.sleep(paced.waitUntil - Date.now());
     try {
       res = await fetch(`${BASE}/audio/speech`, {
         method: 'POST', signal: AbortSignal.timeout(90000),
@@ -64,7 +76,12 @@ export async function speak(model: string, voice: string, input: string): Promis
     if (attempt === 2 || (res.status !== 429 && res.status < 500)) throw new Error(`Speech failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
     const retry = Number(res.headers.get('retry-after'));
     await res.body?.cancel();
-    await Bun.sleep(Math.min(30000, Math.max(1000 * 2 ** attempt, Number.isFinite(retry) ? retry * 1000 : 0)));
+    const wait = Math.min(30000, Math.max(1000 * 2 ** attempt, Number.isFinite(retry) ? retry * 1000 : 0));
+    if (res.status === 429) {
+      paced.slowUntil = Date.now() + 600000;
+      paced.waitUntil = Math.max(paced.waitUntil, Date.now() + wait);
+    }
+    await Bun.sleep(wait);
   }
   if (!res?.ok) throw new Error('The speech provider is unavailable.');
   const audio = new Uint8Array(await res.arrayBuffer());

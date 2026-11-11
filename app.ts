@@ -385,13 +385,15 @@ const sources: Sources = {
       return { ok: false, error: 'Can’t reach the server. Try again.' };
     }
   },
-  // The picked file's bytes go up as the request body.
-  createAudiobook: async ([bookId, path, name, sourceId, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
+  // The picked file's bytes go up as the request body; a download (`source`) or a pasted link
+  // (`link`) the server fetches itself.
+  createAudiobook: async ([bookId, path, name, sourceId, link, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
     try {
-      const bytes = sourceId ? undefined : await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, source: sourceId, model, voice, voiceName, by, rights: rights ? '1' : '0' });
+      const remote = sourceId !== '' || link !== '';
+      const bytes = remote ? undefined : await storage.fs.readFile(path);
+      const query = new URLSearchParams({ name, source: sourceId, model, voice, voiceName, by, rights: rights ? '1' : '0', ...(link ? { link } : {}) });
       const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: sourceId ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        method: 'POST', body: bytes, exactTimeout: remote ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       // A session the server no longer knows (signed out elsewhere, or expired): sign in again.

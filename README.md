@@ -4,16 +4,19 @@ A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
 
 - **One record per book.** Books come from Open Library (title, author, year, cover), keyed by
   their work id. Every audiobook anyone makes of a book hangs off that one record.
-- **Make an audiobook** by selecting a LibGen EPUB/PDF (or an optional Z-Library source) or uploading an EPUB, PDF or TXT, then choosing a voice model. The
+- **Make an audiobook** by selecting a LibGen EPUB/PDF (or an optional Z-Library source),
+  pasting a link to an EPUB, PDF or TXT, or uploading one, then choosing a voice model. The
   server splits the file into chapters and narrates the first. The rest are narrated one at a
   time, when someone asks: each version's chapter list (on the player) has **Generate** beside
   every chapter not yet narrated. Anyone signed in may press it, with at most three chapters
   waiting or narrating per account at once. Each narrated chapter is one stored audio file, kept
-  for everyone.
+  for everyone. A chapter plays from its first part, seconds after Generate, while the rest of
+  it is narrated; and a signed-in listener's next chapter is narrated ahead of them as they
+  reach each one.
 - **A book's page** puts its one action in the dock on a phone, beside Back: **Play** once a
   version has a narrated chapter, **Generate** until then (signed out, it asks you to sign in
   first). Below the title are the book's numbers: when it was published, its audiobooks, and how
-  many chapters the first has and has narrated. Generate opens **Import**, where the book comes from: upload an EPUB, PDF or TXT, pick a copy the server can download, or search
+  many chapters the first has and has narrated. Generate opens **Import**, where the book comes from: upload an EPUB, PDF or TXT, pick a copy the server can download, paste a link to one, or search
   LibGen, Z-Library or the web in the browser to download it and upload it.
 - **Listen.** A book's page shows a sample (the first narrated chapter of its first
   audiobook), every version people have made, and a link to its Goodreads reviews. The player
@@ -37,7 +40,9 @@ domain or that they hold the rights to share it.
 | `server/db.ts` | SQLite schema: `books`, `generations`, `tracks` |
 | `server/places.ts` | Where each signed-in listener is in each audiobook, so their devices carry over |
 | `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
-| `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
+| `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint, two parts at a time |
+| `server/live.ts` | A chapter while it is narrated: its parts so far as one AAC stream, playable before it is done |
+| `server/link.ts` | Importing by link: downloads a pasted EPUB/PDF/TXT link from public HTTPS hosts only |
 | `server/encode.ts` | Compresses each narrated chapter to AAC in M4A with ffmpeg before it is stored |
 | `server/jobs.ts` | Durable SQLite queue: preparing versions, narrating chapters on request, admission limits |
 | `server/libgen.ts` | LibGen discovery, JSON metadata and verified downloads |
@@ -81,6 +86,7 @@ offline server: `bun exact.mjs test web`.
 | `OPENROUTER_API_KEY` | none | Key for the TTS provider; it stays on the server |
 | `TTS_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible speech API |
 | `TTS_MODELS` | Fish Audio S2.1 Pro (free), HeyGen Voice Turbo (free), Gemini 3.8 Flash Lite TTS, Gemini 3.8 Flash TTS | Replace the model picker: `id=Name,id=Name` |
+| `TTS_PARALLEL` | 2 | Parts of a chapter asked of the provider at once (one at a time for ten minutes after a 429) |
 | `DB` | `data.db` | SQLite file |
 | `AUDIO_DIR` | `audio/` beside `DB` | Local audio and scratch directory (on persistent disk) |
 | `MAX_BOOK_CHARACTERS` | 5000000 | Maximum extracted characters in one book |
@@ -109,6 +115,25 @@ upstream searches allowed. Only EPUB/PDF downloads under 50 MiB are accepted, re
 hosts are checked (configured mirrors and numbered `cdn*.booksdl.lc` download hosts), and downloaded bytes must match the selected MD5. Mirror HTML and
 availability can change; this is an optional external provider, not an uptime guarantee.
 
+## Import by link
+
+On **Import**, paste a link to an EPUB, PDF or TXT (it sets any chosen download or file
+aside) and press **Make**. The server downloads it during the request, as it reads an upload,
+with the LibGen downloads' safeguards: HTTPS only (port 443, no user name or password in the
+link), a 50 MiB cap enforced while reading, a 90-second limit, and a check of the first bytes
+(`%PDF-`, a ZIP for EPUB, or text with no NUL bytes; a web page or JSON is refused). The file's
+extension comes from what it is, not from the link. It must not reach the server's own
+network: before anything is reserved, and again at each of up to five redirects (followed by
+hand), the host is resolved and refused unless every address is public, so loopback, private,
+link-local (cloud metadata at `169.254.169.254`), shared (`100.64.0.0/10`), multicast, reserved
+and documentation ranges are out, as are IPv6 ULA, link-local and IPv4-mapped forms of those.
+The download then connects to the address that was checked (the name goes in `Host` and as
+TLS's server name, and the certificate must match it), so a second DNS answer can't redirect it
+inside. The link itself is not kept: its version records a hash (`link:<sha256 prefix>`), which
+finds the same link's audiobook again (same book, model and voice) instead of narrating it
+twice. Link downloads share the two upload slots. The offline server imports only its sample
+link, `https://books.example/a-quiet-harbour.txt`, with no network.
+
 ## Storage and backend capacity
 
 | Data | Storage | Retention |
@@ -116,8 +141,10 @@ availability can change; this is an optional external provider, not an uptime gu
 | Book metadata, accounts, hashed sessions, source IDs/hashes, narration settings and progress | SQLite at `DB` | Retained |
 | Queued source reference (a download not yet prepared) | SQLite `generation_jobs` | Removed once the version is prepared, or fails |
 | Each chapter's extracted text | SQLite `chapters.text` | Kept until that chapter is narrated, then removed; removed with its version |
-| Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
+| Source EPUB/PDF/TXT (uploaded, downloaded or from a pasted link) | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
+| A pasted link | Not kept; its version's `source_ref` is a hash of it (`link:…`) | The hash is retained with the version |
 | Incomplete chapter audio (raw PCM or MP3) | `AUDIO_DIR/.tmp` | Removed after compression and upload, or failure; interrupted chapter is overwritten on resume |
+| A narrating chapter's parts so far, as AAC (`<gen>-<chapter>.live.aac`), what listeners play before it is stored | `AUDIO_DIR/.tmp`, about 15 MB an hour | Removed once the chapter is stored or fails (a listener already reading it keeps its open copy until done); a restart starts the chapter over |
 | Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
 | Listening position | The listener's device; for a signed-in listener also SQLite `places` (chapter, time, when), newest wins | Device: until cleared. Server: retained, a finished book's row marked finished |
 | Voice preference | The listener's device | Until cleared |
@@ -129,8 +156,33 @@ narrated in the order they were asked for. A restart resumes queued work; the ch
 narrating starts over and may repeat TTS calls, finished chapters do not. At most 20 pieces of
 work (chapters waiting or narrating, versions being prepared) are queued at once, and at most
 **three per account**: a version being prepared counts as one (it asks for its first chapter),
-and a fourth Generate is refused (`429`) until one finishes. Concurrent upload parsing is capped
-at two. Books default to a limit of five million extracted characters, and each generated
+and a fourth Generate is refused (`429`) until one finishes. Concurrent upload parsing (and
+link downloads) is capped at two.
+
+**Time to first audio.** A chapter is narrated in parts that start at about 600 characters and
+double to 3,000, two asked of the provider at once (`TTS_PARALLEL`), and written in order. A
+provider that answers `429` is asked one part at a time for the next ten minutes, and no part
+is asked of it before its `retry-after` has passed. As each part is narrated it is encoded into
+the chapter's live AAC stream (`server/live.ts`, one ffmpeg per narrating chapter), and the
+chapter's `src` in `GET /generations/:id` appears with its first part, at the address its
+M4A will be stored under. `/audio/<gen>/<chapter>.m4a` answers that stream (`audio/aac`, no
+byte ranges) until the M4A is stored, holding the response open, with no idle timeout, until
+the last part is in; then the same address serves the M4A, so a player that started early
+plays on without reloading. Each chapter is encoded twice (the live stream, then the stored
+M4A from the raw parts): at ffmpeg's ~100× real time, about 36 CPU-seconds each per narrated
+hour. A failed chapter ends its stream in an error. Measured on a 12,000-character chapter:
+
+| From Generate to first audio | Before | After |
+| --- | --- | --- |
+| Offline silence model (answers instantly) | 55 ms | 56 ms |
+| A simulated provider at a real one's pace (2 s + 20 ms a character) | 255 s | 14 s (whole chapter 137 s) |
+| Fish Audio S2.1 Pro (free) through OpenRouter | 282 s | 17 s (whole chapter 161 s) |
+
+**Narrating ahead.** When a signed-in listener's place (`PUT /me/places/:gen`) reaches a
+chapter, the one after it is asked for on their behalf if nobody has asked (`idle`), so it is
+narrated before they get there. It counts toward their three; at the limit, with the queue
+full or storage short, nothing is asked and the place is kept as usual. A chapter that failed
+waits for its Retry. Books default to a limit of five million extracted characters, and each generated
 audiobook to 2 GiB stored. EPUB expansion is bounded and chapter audio is written to scratch
 chunk by chunk, rather than accumulated in memory. Transient TTS failures retry up to three
 attempts; a chapter that still fails shows **Retry**, its text kept. The same source, book,
@@ -291,14 +343,13 @@ without a network or a key.
 
 `server/tts.ts` calls `POST /audio/speech` and reads each model's voices from
 `GET /models?output_modalities=speech` (`supported_voices`); the app's Voice picker shows them, and
-an unset voice uses the model's first. HeyGen answers only in 16-bit PCM, so its chunks are joined
-and saved as one WAV per chapter; the others are MP3. Run the server from the repo root so Bun loads
+an unset voice uses the model's first. HeyGen answers only in 16-bit PCM, the others MP3; either
+way a chapter's parts are joined and compressed to one M4A. Under `--offline`, setting
+`TTS_BASE_URL` (a test's own provider) adds the `TTS_MODELS` to the silence model. Run the server from the repo root so Bun loads
 `.env`, or pass `--env-file`.
 
 ## Next
 
-- Narrate the next chapter ahead of the listener (when they are near the end of one), within
-  their three, so a book plays on without stopping.
 - Cap how many chapters each account narrates per day, beside the three-at-once limit.
 - More than one narration worker, for a provider that allows it.
 - Ratings of versions; reviews beside the Goodreads link.
