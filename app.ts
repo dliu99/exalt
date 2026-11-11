@@ -1,4 +1,4 @@
-import type { Answer, Result, Sources, Store } from './app.contract.d.ts';
+import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.ts';
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
@@ -20,7 +20,11 @@ const APP_CALLBACK = 'app.exalt.audiobooks:/signed-in';
 // The iOS client's callback: its "iOS URL scheme" in Google's console, the reversed client ID.
 const GOOGLE_IOS_URL_SCHEME: string = import.meta.env.GOOGLE_IOS_URL_SCHEME ?? 'com.googleusercontent.apps.exalt-ios';
 const GOOGLE_IOS_CALLBACK = `${GOOGLE_IOS_URL_SCHEME}:/oauth2redirect`;
+// Downloaded chapters, a folder per version: `<idx>.<ext>` beside `book.json`, the version as it was.
+const OFFLINE = 'app:/cache/offline';
 export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
+  // Downloads, and the notice that a chapter asked for is narrated.
+  `fs.read ${OFFLINE}`, `fs.write ${OFFLINE}`, 'device.notifications purpose.notifications',
   `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`,
   // The iPhone app signs in with Google through @exact/oauth (below).
   'net.fetch https://accounts.google.com', 'net.fetch https://oauth2.googleapis.com', 'auth.session https://accounts.google.com',
@@ -29,6 +33,8 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
 type Reply = Result<'createAudiobook'>;
+type Audiobook = Result<'loadAudiobook'>;
+type Kind = { kind?: string; code?: string };
 type Book = Result<'searchBooks'>[number];
 
 // The session the server answered at sign-in: its bearer token and the name to show. The view
@@ -259,6 +265,11 @@ const sources: Sources = {
   signInWith: ([name], store) => signInWith(store, name === 'apple' ? 'apple' : 'google'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
+  // Downloads and the chapters asked for (below `sources`).
+  loadOffline: (_a, _store, storage) => keptChapters(storage),
+  downloadVersion: ([gen], store, storage) => downloadVersion(gen, store, storage),
+  removeDownload: ([gen], _store, storage) => removeDownload(gen, storage),
+  chaptersReady: ([keys], store, storage) => chaptersReady(keys, store, storage),
   loadPlaces: async (_a, store) => placesEverywhere(store),
   // Keeps the place, unless the book is finished (the last chapter, within its last half minute).
   // The player saves every 15 seconds while it plays, at a pause and at a chapter's change, never
@@ -344,9 +355,11 @@ const sources: Sources = {
   },
   // A version and its chapters. Asked with the session, the server also says how many chapters this
   // listener has narrating (of how many at once) and whether they made it.
-  loadAudiobook: async ([id], store) => {
+  loadAudiobook: async ([id], store, storage) => {
     if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', status: '', error: '', chapters: [], mine: 0, limit: 0, owner: false };
-    const res = await fetch(`${API}/generations/${encodeURIComponent(id)}`, { exactTimeout: 15000, headers: bearer(store) });
+    // Out of reach, a downloaded version answers with the copy kept beside its chapters.
+    const res = await fetch(`${API}/generations/${encodeURIComponent(id)}`, { exactTimeout: 15000, headers: bearer(store) }).catch(async (e) => ({ kept: await keptVersion(id, storage, e) }));
+    if ('kept' in res) return res.kept;
     const g = (await res.json().catch(() => ({}))) as {
       id: string; by: string; model: string; status: string; error: string; book: { id: string; title: string; author: string; cover: string };
       chapters: { idx: number; title: string; src: string; status: string; progress: number; error: string }[];
@@ -408,4 +421,85 @@ const sources: Sources = {
     }
   },
 };
+
+// Downloads. Each chapter is fetched straight into its file (`exactBodyTo`: the host writes the
+// body as it arrives, whole or not at all), so a long chapter never passes through JavaScript.
+const extOf = (src: string) => /\.(\w{2,5})(?:[?#]|$)/.exec(src)?.[1] ?? 'm4a';
+const missing = (e: unknown) => ['ENOENT', 'ENOTDIR'].includes(String((e as Kind)?.code));
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+async function listDir(storage: Storage, path: string): Promise<string[]> {
+  try { return await storage.fs.readdir(path); } catch (e) { if (missing(e)) return []; throw e; }
+}
+async function makeDir(storage: Storage, path: string) {
+  try { await storage.fs.mkdir(path); } catch (e) { if ((e as Kind)?.code !== 'EEXIST') throw e; }
+}
+// A version the server can't be reached for: the copy kept with its download, else the fetch's own failure.
+async function keptVersion(id: string, storage: Storage, failure: unknown): Promise<Audiobook> {
+  if ((failure as Kind)?.code === 'bake') throw failure;
+  try { return JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
+}
+async function keptChapters(storage: Storage): Promise<Result<'loadOffline'>> {
+  const kept: Result<'loadOffline'> = [];
+  for (const gen of await listDir(storage, OFFLINE)) {
+    for (const name of await listDir(storage, `${OFFLINE}/${gen}`)) {
+      const m = /^(\d+)\.\w+$/.exec(name);
+      if (m) kept.push({ gen, idx: Number(m[1]), path: `${OFFLINE}/${gen}/${name}` });
+    }
+  }
+  return kept;
+}
+async function downloadVersion(gen: string, store: Store, storage: Storage): Promise<Reply> {
+  try {
+    const a = await sources.loadAudiobook([gen], store, storage);
+    const dir = `${OFFLINE}/${gen}`;
+    await makeDir(storage, OFFLINE);
+    await makeDir(storage, dir);
+    // The version as it is now, first, so what's downloaded plays without a connection even if the rest doesn't land.
+    await storage.fs.atomicWriteFile(`${dir}/book.json`, encoder.encode(JSON.stringify(a)));
+    const have = new Set(await listDir(storage, dir));
+    for (const c of a.chapters) {
+      const name = `${c.idx}.${extOf(c.src)}`;
+      if (!c.src || have.has(name)) continue;
+      const res = await fetch(c.src, { exactBodyTo: `${dir}/${name}`, exactTimeout: 900000 });
+      if (!res.ok) return { ok: false, error: `Chapter ${c.idx + 1} didn’t download. Try again.` };
+    }
+    return { ok: true, error: '' };
+  } catch (e) {
+    if ((e as Kind)?.code === 'bake') throw e;
+    return { ok: false, error: (e as Kind)?.code === 'full' || /space|quota/i.test(String((e as Error)?.message))
+      ? 'There isn’t room on this device for the download.' : 'The download stopped. Check the connection, then try again.' };
+  }
+}
+async function removeDownload(gen: string, storage: Storage): Promise<Reply> {
+  const dir = `${OFFLINE}/${gen}`;
+  try {
+    for (const name of await listDir(storage, dir)) await storage.fs.rm(`${dir}/${name}`).catch((e) => { if (!missing(e)) throw e; });
+    await storage.fs.rm(dir).catch((e) => { if (!missing(e)) throw e; });
+    return { ok: true, error: '' };
+  } catch (e) {
+    if ((e as Kind)?.code === 'bake') throw e;
+    return { ok: false, error: 'The download couldn’t be removed. Try again.' };
+  }
+}
+// The chapters this listener asked for ("gen/idx", comma-separated) that have finished: narrated,
+// failed, or gone with their version. Ones still narrating, or out of reach, are left for later
+// (a copy kept offline may be old, so only a status that can't change counts).
+async function chaptersReady(keys: string, store: Store, storage: Storage): Promise<Result<'chaptersReady'>> {
+  const asked = keys.split(',').filter(Boolean).map((key) => ({ key, gen: key.split('/')[0], idx: Number(key.split('/')[1]) }));
+  const done: Result<'chaptersReady'> = [];
+  for (const gen of [...new Set(asked.map((a) => a.gen))]) {
+    let a: Audiobook | null = null;
+    try { a = await sources.loadAudiobook([gen], store, storage); } catch (e) {
+      if ((e as Kind)?.code === 'bake') throw e;
+      if ((e as Kind)?.kind) continue;
+    }
+    for (const k of asked.filter((x) => x.gen === gen)) {
+      const c = a?.chapters.find((x) => x.idx === k.idx);
+      if (!a || !c) done.push({ key: k.key, gen, idx: k.idx, title: '', book: a?.title ?? '', status: 'gone' });
+      else if (['ready', 'failed', 'unavailable'].includes(c.status)) done.push({ key: k.key, gen, idx: k.idx, title: c.title, book: a.title, status: c.status });
+    }
+  }
+  return done;
+}
+
 export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native);

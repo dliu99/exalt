@@ -5,6 +5,7 @@
     "": {
       "name": "exalt-app",
       "dependencies": {
+        "@exact/notifications": "file:../exact/packages/notifications",
         "@exact/oauth": "file:../exact/packages/oauth",
         "@exact/passkeys": "file:../exact/packages/passkeys",
         "@exact/sign-in": "file:../exact/packages/sign-in",
@@ -12,6 +13,8 @@
     },
   },
   "packages": {
+    "@exact/notifications": ["@exact/notifications@file:../exact/packages/notifications", {}],
+
     "@exact/oauth": ["@exact/oauth@file:../exact/packages/oauth", {}],
 
     "@exact/passkeys": ["@exact/passkeys@file:../exact/packages/passkeys", {}],
