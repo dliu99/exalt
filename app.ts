@@ -199,6 +199,38 @@ type Place = Result<'loadPlaces'>[number];
 const places = (store: Store): Place[] => {
   try { return (JSON.parse(store.get(PLACES) ?? '[]') as Place[]).map((p) => ({ ...p, at: Number(p.at) || 0 })); } catch { return []; }
 };
+// A signed-in listener's places are on the server too (GET and PUT /me/places), so the web and
+// the phone carry over. The newest `at` wins; a book finished elsewhere (`finished`, newer than
+// this device's place in it) leaves the shelf here too. Signed out, or the server out of reach,
+// it is this device's alone.
+type Kept = Place & { finished: boolean };
+let asking: { token: string; rows: Promise<Kept[]> } | null = null;
+function serverPlaces(store: Store): Promise<Kept[]> {
+  const s = session(store);
+  if (!s) return Promise.resolve([]);
+  // The player's places and Home's shelf ask together: one request answers both.
+  if (asking?.token === s.token) return asking.rows;
+  const rows = (async () => {
+    const res = await fetch(`${API}/me/places`, { exactTimeout: 8000, headers: bearer(store) });
+    if (!res.ok) return [];
+    return ((await res.json()) as Record<string, unknown>[]).map((p) => ({
+      gen: String(p.gen), book: String(p.book), title: String(p.title), author: String(p.author ?? ''), cover: String(p.cover ?? ''),
+      track: Number(p.track) || 0, tracks: Number(p.tracks) || 0, time: Number(p.time) || 0, duration: Number(p.duration) || 0,
+      at: Number(p.at) || 0, finished: p.finished === true,
+    }));
+  })().catch(() => []).finally(() => { if (asking?.rows === rows) asking = null; });
+  asking = { token: s.token, rows };
+  return rows;
+}
+async function placesEverywhere(store: Store): Promise<Place[]> {
+  const newest = new Map<string, Place & { finished?: boolean }>();
+  for (const p of [...places(store), ...await serverPlaces(store)]) {
+    const had = newest.get(p.gen);
+    if (!had || p.at > had.at) newest.set(p.gen, p);
+  }
+  return [...newest.values()].filter((p) => !p.finished).sort((a, b) => b.at - a.at).slice(0, 24)
+    .map(({ gen, book, title, author, cover, track, tracks, time, duration, at }) => ({ gen, book, title, author, cover, track, tracks, time, duration, at }));
+}
 // The shelf's words for a place: about how long is left (the chapters still to come taken to
 // run as long as this one), and when it was last heard.
 const span = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.max(1, Math.round(s / 60))}m`);
@@ -227,20 +259,27 @@ const sources: Sources = {
   signInWith: ([name], store) => signInWith(store, name === 'apple' ? 'apple' : 'google'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
-  loadPlaces: async (_a, store) => places(store),
+  loadPlaces: async (_a, store) => placesEverywhere(store),
   // Keeps the place, unless the book is finished (the last chapter, within its last half minute).
+  // The player saves every 15 seconds while it plays, at a pause and at a chapter's change, never
+  // on every tick; a signed-in listener's place goes to the server each time too.
   savePlace: async ([gen, book, title, author, cover, track, tracks, time, duration, at], store) => {
     const done = track >= tracks - 1 && duration > 0 && time >= duration - 30;
     const rest = places(store).filter((p) => p.gen !== gen);
     const kept = done ? rest : [{ gen, book, title, author, cover, track, tracks, time, duration, at }, ...rest];
     store.set(PLACES, JSON.stringify(kept.slice(0, 24)));
+    if (session(store)) {
+      await fetch(`${API}/me/places/${encodeURIComponent(gen)}`, { method: 'PUT', exactTimeout: 8000,
+        headers: { 'content-type': 'application/json', ...bearer(store) },
+        body: JSON.stringify({ track, tracks, time, duration, at: Math.round(at), finished: done }) }).catch(() => {});
+    }
     return { ok: true, error: '' };
   },
   // Home's shelf, six books: the ones in progress here, newest first, then the listener's own, then what is on Exalt.
   loadShelf: async ([now], store, storage) => {
     const shelf: Result<'loadShelf'> = [], seen = new Set<string>();
     const put = (s: Result<'loadShelf'>[number]) => { if (shelf.length < 6 && !seen.has(s.book)) { seen.add(s.book); shelf.push(s); } };
-    for (const p of places(store)) put({ book: p.book, gen: p.gen, title: p.title, author: p.author, cover: p.cover,
+    for (const p of await placesEverywhere(store)) put({ book: p.book, gen: p.gen, title: p.title, author: p.author, cover: p.cover,
       chapter: `Chapter ${p.track + 1} of ${p.tracks}`, left: leftText(p), when: whenText(p.at, now), frac: fraction(p) });
     if (shelf.length < 6) for (const m of await Promise.resolve(sources.loadMine([], store, storage)).catch(() => [])) {
       const ready = m.status === 'ready';

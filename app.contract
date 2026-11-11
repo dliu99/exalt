@@ -280,8 +280,8 @@ component App
   resource account = currentAccount() as shape Account else empty(signedIn=false, name="")
   resource identities = getIdentityCapabilities() as shape IdentityCapabilities
   mutation nonce as shape Reply
-  mutation signedIn as shape Reply refreshes account, mine, shelf
-  mutation left as shape Reply refreshes account, mine, shelf
+  mutation signedIn as shape Reply refreshes account, mine, shelf, places
+  mutation left as shape Reply refreshes account, mine, shelf, places
   derive signInError = match signedIn { case some(r) => r.error, case none => "" }
   derive bookId = match stack(nav).filter(e => e.name == "book" or e.name == "create").at(-1) { case some(e) => e.params.id, case none => "" }
   derive genId = match stack(nav).filter(e => e.name == "play").at(-1) { case some(e) => e.params.gen, case none => "" }
@@ -598,8 +598,8 @@ component App
               column position="absolute" inset=0 box-sizing="border-box" justify-content="space-between" testId="door"
                 padding="calc(env(safe-area-inset-top) + 40px) 20px calc(env(safe-area-inset-bottom) + 20px)"
                 // The books are the screen: one line in the sky, and the stack, large, to tap or throw through.
-                column align-items="center" gap=34 flex=1 justify-content="center" padding-bottom=20
-                  text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=28 letter-spacing="-0.01em" color="#1b1f2b" text-align="center"
+                column align-items="center" gap=34 flex=1 justify-content="center" padding-bottom=20 font-size="min(-exact-body, 22px)"
+                  text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size="1.75em" letter-spacing="-0.01em" color="#1b1f2b" text-align="center"
                     animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
                   button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
                     width=coverW height=coverH flex-shrink=0 touch-action="pan-y" pan=dragBook panrelease=dropBook cursor="grab"
@@ -609,38 +609,38 @@ component App
                         dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
                 column gap=12 align-items="stretch" animation=(still ? "none" : "arrive 1s 0.45s cubic-bezier(.2,.7,.2,1) both")
                   if signInError != ""
-                    text signInError color="#7a241c" font-family="Jost" font-size=14 text-align="center" testId="door-error"
+                    text signInError color="#7a241c" font-family="Jost" font-size="0.875rem" text-align="center" testId="door-error"
                   // The site needs Exact's button (it holds the popup at the press); the app's is its own, on glass,
                   // and opens a sheet of the providers' own buttons: Apple's, then Google's.
                   if app.ok
                     button commandfor="door-sheet" command="show-modal" testId="door-start" class=Chip height=58 border-radius=18 backgroundMaterial="glass" box-shadow="0 18px 40px -18px rgba(20,24,36,0.45)" -exact-press-haptic="impact-medium"
-                      text "Get started" font-family="system-ui" font-weight=600 font-size=17 color="#14171f"
+                      text "Get started" font-family="system-ui" font-weight=600 font-size="1.0625rem" color="#14171f"
                     // A half sheet as tall as its content; our own buttons, so Apple's and Google's read in one type, the app's.
                     dialog id="door-sheet" aria-label="Log in or sign up" testId="door-sheet"
                       column gap=12 align-items="stretch" width=viewport.width box-sizing="border-box" padding="32px 20px calc(env(safe-area-inset-bottom) + 20px)"
-                        text "Log in or sign up" role="heading" aria-level=2 font-family="system-ui" font-weight=700 font-size=26 text-align="center" color="#14171f" margin-bottom=20
+                        text "Log in or sign up" role="heading" aria-level=2 font-family="system-ui" font-weight=700 font-size="1.625rem" text-align="center" color="#14171f" margin-bottom=20
                         button press=appleSignIn aria-label="Continue with Apple" testId="sheet-apple" class=Chip width="100%" height=56 border-radius=16 background-color="#000" gap=10 -exact-press-haptic="impact-light"
                           image "symbol:sf/apple.logo" color="#fff" width=19 height=19
-                          text "Continue with Apple" font-family="system-ui" font-weight=600 font-size=17 color="#fff"
+                          text "Continue with Apple" font-family="system-ui" font-weight=600 font-size="1.0625rem" color="#fff"
                         button press=googleSignIn aria-label="Continue with Google" testId="sheet-google" class=Chip width="100%" height=56 border-radius=16 background-color="#fff" border="1px solid #d6d8de" gap=10 -exact-press-haptic="impact-light"
                           svg viewBox="0 0 48 48" width=19 height=19 aria-hidden="true"
                             path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
                             path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
                             path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
                             path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                          text "Continue with Google" font-family="system-ui" font-weight=600 font-size=17 color="#14171f"
+                          text "Continue with Google" font-family="system-ui" font-weight=600 font-size="1.0625rem" color="#14171f"
                         if signInError != ""
-                          text signInError color="#7a241c" font-family="system-ui" font-size=14 text-align="center" testId="sheet-error"
+                          text signInError color="#7a241c" font-family="system-ui" font-size="0.875rem" text-align="center" testId="sheet-error"
                   else
                     exact-sign-in-button provider="google" theme="filled_black" shape="pill" press=googleSignIn testId="door-google" width="100%" height=52
             else
               scroll id="lander-scroll" position="absolute" top=0 left=0 width="100%" height="100%" scroll=scrolled
                 overflow-x="hidden" overflow-y=(gated ? "hidden" : "auto") scrollbar-width="none"
                 // The hero, over the painting: the line, and the stack of books to throw through.
-                column height=viewport.height box-sizing="border-box" align-items="center" justify-content="center"
-                  gap=(wide ? 44 : gated ? 26 : 32) padding=(wide ? "72px 24px 40px" : "96px 20px 32px")
+                column min-height=viewport.height flex-shrink=0 box-sizing="border-box" align-items="center" justify-content="center" font-size="min(-exact-body, 22px)"
+                  gap=(wide ? 44 : gated ? 26 : 32) padding=(wide ? "72px 24px 40px" : "6rem 20px 32px")
                   text "Give great words a voice" role="heading" aria-level=1 font-family="Jost" font-weight=300 text-align="center"
-                    font-size=(wide ? min(76, round(viewport.width * 0.052)) : 40) line-height=1.05 letter-spacing="-0.02em" color="#1b1f2b"
+                    font-size=(wide ? `${min(76, round(viewport.width * 0.052)) / 16}em` : "2.5em") line-height=1.05 padding="0.2em 0" margin="-0.2em 0" letter-spacing="-0.02em" color="#1b1f2b"
                     opacity=max(0, 1 - fade * 1.5) animation=(still ? "none" : "inkIn 1.1s 0.15s cubic-bezier(.2,.7,.2,1) both") testId="hero-title"
                   // Tap the top book to throw it aside, or swipe it away in any direction.
                   button press=tapBook aria-label="Next book" testId="stack" appearance="none" position="relative"
@@ -651,70 +651,71 @@ component App
                         dx=(depthOf(i, cur, n) == 0 ? dragX : 0), dy=(depthOf(i, cur, n) == 0 ? dragY : 0), dragging=dragging)
                   // The focused book's title, lifted off the painting by a soft pale halo, and the one thing to do with it.
                   for g in focused key=g.id
-                    column align-items="center" gap=16 padding-top=(wide ? 20 : 16) position="relative" opacity=max(0, 1 - fade * 1.5)
+                    // On a phone the stack's lower books hang below it, so the title stands clear of them.
+                    column align-items="center" gap=16 padding-top=(wide ? 20 : 28) position="relative" opacity=max(0, 1 - fade * 1.5)
                       animation=(still ? "none" : "inkIn 500ms cubic-bezier(.2,.7,.2,1) both")
                       view position="absolute" left="-30%" right="-30%" top="-10%" bottom="-25%" pointer-events="none"
                         background-image="radial-gradient(ellipse closest-side, rgba(242,242,246,0.7) 0%, rgba(242,242,246,0.35) 55%, rgba(242,242,246,0) 100%)"
                       column align-items="center" gap=5 position="relative"
-                        text g.title font-family="Jost" font-weight=400 font-size=18 color="#14171f" text-align="center" line-clamp=1 testId="great-title"
-                        text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
+                        text g.title font-family="Jost" font-weight=400 font-size="1.125rem" color="#14171f" text-align="center" line-clamp=1 testId="great-title"
+                        text g.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="#2c3140" text-align="center" testId="great-author"
                       if not gated
                         button press=seek(g) testId="seek" position="relative" class=Chip backgroundMaterial="glass"
-                          text "Open in Exalt" font-family="Jost" font-weight=400 font-size=15 color="#14171f"
-                          image "symbol:forward-chevron" color="#14171f" width=11 height=11
+                          text "Open in Exalt" font-family="Jost" font-weight=400 font-size="0.9375rem" color="#14171f"
+                          image "symbol:forward-chevron" color="#14171f" width="0.6875rem" height="0.6875rem"
                   // The door: Google's own button, the one way in.
                   if gated
-                    column align-items="center" gap=10 width="100%" max-width=300 position="relative" opacity=max(0, 1 - fade * 1.5) testId="door"
+                    column align-items="center" gap=10 width="100%" max-width="18.75rem" position="relative" opacity=max(0, 1 - fade * 1.5) testId="door"
                       exact-sign-in-button provider="google" theme="filled_black" shape="pill" press=googleSignIn testId="door-google" width="100%" height=48
                       if signInError != ""
-                        text signInError color="#b2463c" font-family="Jost" font-size=14 text-align="center" testId="door-error"
+                        text signInError color="#b2463c" font-family="Jost" font-size="0.875rem" text-align="center" testId="door-error"
                 // Below the fold, in the dark: what Exalt is, and signing up.
-                column min-height=viewport.height display=(gated ? "none" : "flex") box-sizing="border-box" align-items="center" justify-content="center"
-                  padding=(wide ? "120px 24px" : "96px 24px") gap=44 position="relative"
+                column min-height=viewport.height flex-shrink=0 display=(gated ? "none" : "flex") box-sizing="border-box" align-items="center" justify-content="center"
+                  padding=(wide ? "120px 24px 7.5rem" : "96px 24px 6rem") gap=44 position="relative"
                   column max-width=640 align-items="center" gap=22 opacity=fade
                     text "Exalt turns any book into audio in a voice you choose."
-                      font-family="Jost" font-weight=300 font-size=(wide ? 32 : 24) line-height=1.3 color="#eeebe4" text-align="center" testId="about"
+                      font-family="Jost" font-weight=300 font-size=(wide ? "2rem" : "1.5rem") line-height=1.3 padding="0.1em 0" margin="-0.1em 0" color="#eeebe4" text-align="center" testId="about"
                     text "Generate, listen, and share for free."
-                      font-family="Jost" font-weight=400 font-size=(wide ? 17 : 15) line-height=1.6 color="#9a978f" text-align="center" max-width=520
-                  column width="100%" max-width=300 align-items="stretch" gap=12 opacity=fade
+                      font-family="Jost" font-weight=400 font-size=(wide ? "1.0625rem" : "0.9375rem") line-height=1.6 color="#9a978f" text-align="center" max-width=520
+                  column width="100%" max-width="18.75rem" align-items="stretch" gap=12 opacity=fade
                     if account.signedIn
-                      text `Signed in as ${account.name}` font-family="Jost" font-size=15 color="#9a978f" text-align="center" testId="lander-account"
+                      text `Signed in as ${account.name}` font-family="Jost" font-size="0.9375rem" color="#9a978f" text-align="center" testId="lander-account"
                       link href=path("home") testId="lander-library" padding="13px 26px" border-radius=999 background-color="#eeebe4" display="flex" justify-content="center"
                         -exact-press-scale=0.96 -exact-press-haptic="impact-light"
-                        text "Open the library" font-family="Jost" font-weight=500 font-size=15 color="#1b1f2b"
+                        text "Open the library" font-family="Jost" font-weight=500 font-size="0.9375rem" color="#1b1f2b"
                     else
                       if identities.providers.google.active
                         exact-sign-in-button provider="google" press=googleSignIn testId="lander-google" width="100%" height=46
                       if signInError != ""
-                        text signInError color="#e8837b" font-family="Jost" font-size=14 text-align="center" testId="lander-sign-in-error"
+                        text signInError color="#e8837b" font-family="Jost" font-size="0.875rem" text-align="center" testId="lander-sign-in-error"
                       link href=path("home") testId="lander-library" padding="10px 0" display="flex" justify-content="center"
-                        text "Or just listen  →" font-family="Jost" font-size=15 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
+                        text "Or just listen  →" font-family="Jost" font-size="0.9375rem" color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=3
                   // The credit, at the foot of the page.
                   row align-items="center" justify-content="center" gap=5 position="absolute" left=0 right=0 bottom=(wide ? 32 : 40) opacity=fade testId="credit"
-                    text "Made with" font-family="Jost" font-size=13 color="#9a978f"
-                    text "♥" font-size=13 color="#e8837b" aria-label="love"
-                    text "by" font-family="Jost" font-size=13 color="#9a978f"
+                    text "Made with" font-family="Jost" font-size="0.8125rem" color="#9a978f"
+                    text "♥" font-size="0.8125rem" color="#e8837b" aria-label="love"
+                    text "by" font-family="Jost" font-size="0.8125rem" color="#9a978f"
                     link href="https://devinliu.xyz" testId="credit-link"
-                      text "Devin Liu" font-family="Jost" font-size=13 color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
+                      text "Devin Liu" font-family="Jost" font-size="0.8125rem" color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
             row align-items="center" padding=(wide ? "28px 7vw" : "14px 20px 14px 24px") position="absolute" top="env(safe-area-inset-top)" left=0 right=0 z-index=5
               pointer-events="none"
               view flex=1 display=(phoneDoor ? "none" : "flex")
-                link href="/" testId="wordmark" pointer-events="auto" padding="6px 0"
-                  text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
+                link href="/" testId="wordmark" pointer-events="auto" padding="6px 0" font-size="min(-exact-body, 23px)"
+                  text "EXALT" font-family="Jost" font-weight=500 font-size="0.875em" letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
               if not gated
-                link href=path("home") testId="enter" pointer-events="auto" class=Chip backgroundMaterial="glass" color-scheme=(lit ? "dark" : "light")
-                  text "Home" font-family="Jost" font-weight=400 font-size=15 letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
+                link href=path("home") testId="enter" pointer-events="auto" class=Chip font-size="min(-exact-body, 23px)" backgroundMaterial="glass" color-scheme=(lit ? "dark" : "light")
+                  text "Home" font-family="Jost" font-weight=400 font-size="0.9375em" letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
         // Home: a shelf in the fog. Six recent books; the one picked comes forward, its controls under it.
         if e.name == "home"
           column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color="#eceef2" status-bar-style="dark-content" testId="home"
             image "assets/lander.jpg" alt="" position="absolute" top=0 left=paintLeft width=paintW height=paintH pointer-events="none"
             view position="absolute" inset=0 pointer-events="none"
               background-image="linear-gradient(180deg, rgba(236,238,242,0.2) 0%, rgba(236,238,242,0.72) 34%, rgba(236,238,242,0.9) 100%)"
-            column position="absolute" left=0 right=0 top=(wide ? "96px" : "calc(env(safe-area-inset-top) + 20px)") padding=(wide ? "0 48px" : "0 24px") gap=(wide ? 10 : 30) align-items=(wide ? "center" : "flex-start")
+            column position="absolute" left=0 right=0 top=(wide ? "96px" : "calc(env(safe-area-inset-top) + 20px)") padding=(wide ? "0 48px" : "0 24px") gap=(wide ? 10 : 30) align-items=(wide ? "center" : "flex-start") font-size="min(-exact-body, 22px)"
               if not wide
-                text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color="#14171f"
+                text "EXALT" font-family="Jost" font-weight=500 font-size="0.875em" letter-spacing="0.5em" color="#14171f"
               text (account.signedIn ? `Welcome back, ${account.name}` : "Welcome") role="heading" aria-level=1 font-family="Jost" font-weight=300
-                font-size=(wide ? 52 : 36) letter-spacing="-0.02em" color="#14171f" line-clamp=1 testId="home-title"
+                font-size=(wide ? "3.25em" : "2.25em") letter-spacing="-0.02em" color="#14171f" line-clamp=1 text-overflow="ellipsis" max-width="100%" testId="home-title"
                 animation=(still ? "none" : "inkIn 800ms cubic-bezier(.2,.7,.2,1) both")
             if account.signedIn and not wide
               button popovertarget="account-menu" aria-label="Account" testId="account-button" class=Round backgroundMaterial="glass" position="absolute" top="calc(env(safe-area-inset-top) + 8px)" right=16
@@ -726,8 +727,8 @@ component App
               column position="absolute" left=0 right=0 top="45%" align-items="center" testId="no-places"
                 if not pending(shelf)
                   link href=path("explore") testId="home-explore" class=Chip backgroundMaterial="glass"
-                    image "symbol:search" color="#14171f" width=15 height=15
-                    text "Find a book" font-family="Jost" font-size=15 color="#14171f"
+                    image "symbol:search" color="#14171f" width="0.9375rem" height="0.9375rem"
+                    text "Find a book" font-family="Jost" font-size="0.9375rem" color="#14171f"
             else
               // The ledges the books stand on.
               view position="absolute" left=(shelfLeft - 14) top=shelfTop width=(rowW + 28) height=12 translate=`0px ${bookH + 5}px` border-radius=6 backgroundMaterial="glass" class=Lift pointer-events="none" testId="shelf"
@@ -745,13 +746,13 @@ component App
                   BookCover(src=s.cover, title=s.title, w=bookW)
               // The picked book's controls, on glass at the foot of the screen.
               for s in shelf.filter(x => x.book == fore) key=s.book
-                column position="absolute" left=16 right=16 bottom="calc(env(safe-area-inset-bottom) + 12px)" z-index=9 margin="0 auto" max-width=440 gap=14 padding="18px 18px 18px 22px" border-radius=34
+                column position="absolute" left=16 right=16 bottom="calc(env(safe-area-inset-bottom) + 12px)" z-index=9 margin="0 auto" max-width="27.5rem" gap=14 padding="18px 18px 18px 22px" border-radius=34
                   backgroundMaterial="glass" class=Lift testId="picked" animation=(still ? "none" : "arrive 480ms cubic-bezier(.2,.7,.2,1) both")
                   row align-items="center" gap=14
                     button press=openPicked(s) appearance="none" padding=0 text-align="start" cursor="pointer" flex=1 min-width=0 testId="picked-open" -exact-press-opacity=0.6
                       column gap=3
-                        text s.title font-family="Jost" font-weight=400 font-size=20 color="#14171f" line-clamp=1 testId="picked-title"
-                        text s.author.toUpperCase() font-family="Jost" font-weight=500 font-size=10 letter-spacing="0.24em" color="#6b7080" line-clamp=1
+                        text s.title font-family="Jost" font-weight=400 font-size="1.25rem" color="#14171f" line-clamp=1 testId="picked-title"
+                        text s.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.625rem" letter-spacing="0.24em" color="#626777" line-clamp=1
                     button press=playPicked(s) appearance="none" aria-label=(s.gen != "" ? "Play" : "Open") testId="picked-play" width=58 height=58 min-width=58 padding=0 flex-shrink=0 border-radius=999
                       display="flex" align-items="center" justify-content="center" background-color="#14171f" cursor="pointer" box-shadow="0 14px 30px -12px rgba(20,23,31,0.55)"
                       -exact-press-scale=0.9 -exact-press-haptic="impact-medium"
@@ -760,8 +761,8 @@ component App
                     view height=3 background-color="rgba(20,23,31,0.12)" border-radius=2
                       view height=3 width=`${round(s.frac * 100)}%` background-color="#14171f" border-radius=2
                   row justify-content="space-between" gap=12
-                    text (s.left != "" ? s.left : s.chapter) font-family="Jost" font-size=13 color="#14171f" line-clamp=1 testId="picked-left"
-                    text (s.when != "" ? s.when : s.left != "" ? s.chapter : "") font-family="Jost" font-size=13 color="#6b7080" line-clamp=1 testId="picked-when"
+                    text (s.left != "" ? s.left : s.chapter) font-family="Jost" font-size="0.8125rem" color="#14171f" line-clamp=1 testId="picked-left"
+                    text (s.when != "" ? s.when : s.left != "" ? s.chapter : "") font-family="Jost" font-size="0.8125rem" color="#626777" line-clamp=1 testId="picked-when"
             if wide
               TopBar(active="home")
         // Explore: search every book, with suggestions under the field as you type.
@@ -771,9 +772,9 @@ component App
             scroll id="explore-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               view height="env(safe-area-inset-top)" flex-shrink=0
               column margin="0 auto" width="100%" max-width=(asked != "" ? 760 : 1080) box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "28px 20px 200px") gap=(wide ? 48 : 30)
-                column gap=18 position="relative" z-index=2
-                  text "Explore" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 38) letter-spacing="-0.02em" color="#14171f"
-                  column position="relative" width="100%" max-width=640
+                column gap=18 position="relative" z-index=2 font-size="min(-exact-body, 22px)"
+                  text "Explore" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? "3.25em" : "2.375em") letter-spacing="-0.02em" color="#14171f"
+                  column position="relative" width="100%" max-width="40rem"
                     SearchField(value=query, hint="Search by title or author", label="Search Books", id="search", focused=fieldOn, busy=(searching or suggesting), still=still, big=wide,
                       edit=search, enter=ask, focus=fieldFocus, blur=fieldBlur, clear=clearSearch)
                     if showSuggestions
@@ -783,13 +784,13 @@ component App
                           SuggestionRow(book=b)
                 if asked != ""
                   if searchError != ""
-                    text searchError font-family="Jost" font-size=16 color="#b2463c" testId="search-error"
+                    text searchError font-family="Jost" font-size="1rem" color="#b2463c" testId="search-error"
                   else if pending(found) and found.length == 0
                     column role="status" aria-label="Searching" testId="searching"
                       for n in [0, 1, 2, 3, 4] key=n
                         SkeletonRow(i=n, still=still, face=false)
                   else if found.length == 0
-                    text "No books found. Try a different title or author." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-results"
+                    text "No books found. Try a different title or author." font-family="Jost" font-weight=300 font-size="1.25rem" color="#14171f" testId="no-results"
                       animation=(still ? "none" : "inkIn 420ms cubic-bezier(.2,.7,.2,1) both")
                   else
                     // A new search dims the last one's books until its own arrive.
@@ -805,10 +806,10 @@ component App
             Mist()
             scroll id="voices-scroll" position="absolute" top=0 left=0 width="100%" height="100%" overflow-x="hidden" overflow-y="auto"
               view height="env(safe-area-inset-top)" flex-shrink=0
-              column margin="0 auto" width="100%" max-width=760 box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "28px 20px 200px") gap=(wide ? 32 : 26)
-                column gap=18
-                  text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? 52 : 38) letter-spacing="-0.02em" color="#14171f"
-                  view width="100%" max-width=560
+              column margin="0 auto" width="100%" max-width="47.5rem" box-sizing="border-box" padding=(wide ? "120px 48px 96px" : "28px 20px 200px") gap=(wide ? 32 : 26)
+                column gap=18 font-size="min(-exact-body, 22px)"
+                  text "Voices" role="heading" aria-level=1 font-family="Jost" font-weight=300 font-size=(wide ? "3.25em" : "2.375em") letter-spacing="-0.02em" color="#14171f"
+                  view width="100%" max-width="35rem"
                     SearchField(value=voiceQuery, hint="Search voices", label="Search Voices", id="voice-search", focused=voiceOn, busy=voiceBusy, still=still, big=false,
                       edit=editVoiceQuery, enter=takeVoiceQuery, focus=voiceFocus, blur=voiceBlur, clear=clearVoiceQuery)
                 if pending(voiceList) and voiceList.length == 0
@@ -816,7 +817,7 @@ component App
                     for n in [0, 1, 2, 3, 4] key=n
                       SkeletonRow(i=n, still=still, face=true)
                 else if voiceList.length == 0
-                  text "No voices found." font-family="Jost" font-weight=300 font-size=20 color="#14171f" testId="no-voices"
+                  text "No voices found." font-family="Jost" font-weight=300 font-size="1.25rem" color="#14171f" testId="no-voices"
                     animation=(still ? "none" : "inkIn 420ms cubic-bezier(.2,.7,.2,1) both")
                 else
                   column gap=8
@@ -1096,20 +1097,21 @@ component TopBar
     row align-items="center" gap=30 padding="22px 7vw" position="absolute" top=0 left=0 right=0 z-index=5
       background-color="rgba(236,238,242,0.72)" backdrop-filter="blur(14px)" border-bottom="1px solid rgba(20,23,31,0.06)"
       link href=path("lander") testId="nav-exalt"
-        text "EXALT" font-family="Jost" font-weight=500 font-size=14 letter-spacing="0.5em" color="#14171f"
+        text "EXALT" font-family="Jost" font-weight=500 font-size="0.875rem" letter-spacing="0.5em" color="#14171f"
       view flex=1
       link href=path("home") testId="nav-home" padding="4px 0"
-        text "Home" font-family="Jost" font-size=15 color=(active == "home" ? "#14171f" : "#6b7080")
+        text "Home" font-family="Jost" font-size="0.9375rem" color=(active == "home" ? "#14171f" : "#626777")
           border-bottom=(active == "home" ? "1px solid #14171f" : "1px solid transparent") padding-bottom=2
       link href=path("explore") testId="nav-explore" padding="4px 0"
-        text "Explore" font-family="Jost" font-size=15 color=(active == "explore" ? "#14171f" : "#6b7080")
+        text "Explore" font-family="Jost" font-size="0.9375rem" color=(active == "explore" ? "#14171f" : "#626777")
           border-bottom=(active == "explore" ? "1px solid #14171f" : "1px solid transparent") padding-bottom=2
 
 component SectionTitle
   props
     label: string
   view
-    text label.toUpperCase() role="heading" aria-level=2 font-family="Jost" font-weight=500 font-size=11 letter-spacing="0.26em" color="#6b7080"
+    view font-size="min(-exact-body, 30px)"
+      text label.toUpperCase() role="heading" aria-level=2 font-family="Jost" font-weight=500 font-size="0.6875em" letter-spacing="0.26em" color="#626777"
 
 // A cover as a book: page edges under it and light along the spine. Without art, its title on cloth.
 component BookCover
@@ -1137,10 +1139,10 @@ component BookCard
       column gap=10
         BookCover(src=book.cover, title=book.title, w=w)
         column gap=2
-          text book.title font-family="Jost" font-size=15 color="#14171f" line-clamp=2
-          text book.author font-family="Jost" font-size=13 color="#6b7080" line-clamp=1
+          text book.title font-family="Jost" font-size="0.9375rem" color="#14171f" line-clamp=2
+          text book.author font-family="Jost" font-size="0.8125rem" color="#626777" line-clamp=1
           if book.versions > 0
-            text versionsText(book.versions) font-family="Jost" font-size=12 color="#4a4f5c"
+            text versionsText(book.versions) font-family="Jost" font-size="0.75rem" color="#4a4f5c"
 
 component PlaceCard
   props
@@ -1151,8 +1153,8 @@ component PlaceCard
       column gap=10
         BookCover(src=place.cover, title=place.title, w=140)
         column gap=4
-          text place.title font-family="Jost" font-size=15 color="#14171f" line-clamp=1
-          text `Chapter ${place.track + 1} of ${place.tracks}` font-family="Jost" font-size=13 color="#6b7080"
+          text place.title font-family="Jost" font-size="0.9375rem" color="#14171f" line-clamp=1
+          text `Chapter ${place.track + 1} of ${place.tracks}` font-family="Jost" font-size="0.8125rem" color="#626777"
           view height=2 width=140 background-color="rgba(20,23,31,0.12)" border-radius=1 margin-top=4
             view height=2 width=`${round(placeFrac(place) * 100)}%` background-color="#14171f" border-radius=1
 
@@ -1180,11 +1182,11 @@ component ResultRow
       row gap=18 align-items="center" padding="14px 0" border-bottom="1px solid rgba(20,23,31,0.08)"
         BookCover(src=book.cover, title=book.title, w=48)
         column flex=1 min-width=0 gap=3
-          text book.title font-family="Jost" font-size=18 color="#14171f" line-clamp=1
-          text byline(book) font-family="Jost" font-size=14 color="#6b7080" line-clamp=1
+          text book.title font-family="Jost" font-size="1.125rem" color="#14171f" line-clamp=1
+          text byline(book) font-family="Jost" font-size="0.875rem" color="#626777" line-clamp=1
           if book.versions > 0
-            text versionsText(book.versions) font-family="Jost" font-size=13 color="#4a4f5c"
-        image "symbol:forward-chevron" color="#9a9eab" width=12 height=12
+            text versionsText(book.versions) font-family="Jost" font-size="0.8125rem" color="#4a4f5c"
+        image "symbol:forward-chevron" color="#9a9eab" width="0.75rem" height="0.75rem"
 
 component SuggestionRow
   props
@@ -1194,8 +1196,8 @@ component SuggestionRow
       row gap=12 align-items="center" flex=1 min-width=0
         BookCover(src=book.cover, title=book.title, w=28)
         column flex=1 min-width=0 gap=1
-          text book.title font-family="Jost" font-size=15 color="#14171f" line-clamp=1
-          text byline(book) font-family="Jost" font-size=13 color="#6b7080" line-clamp=1
+          text book.title font-family="Jost" font-size="0.9375rem" color="#14171f" line-clamp=1
+          text byline(book) font-family="Jost" font-size="0.8125rem" color="#626777" line-clamp=1
 
 component VersionRow
   props
@@ -1243,15 +1245,15 @@ component VoiceRow
     row gap=16 align-items="center" padding="16px 0" border-bottom="1px solid rgba(20,23,31,0.08)" testId=`voice-${voice.id}`
       VoiceFace(title=voice.title, cover=voice.cover, size=52)
       column flex=1 min-width=0 gap=3
-        text voice.title font-family="Jost" font-size=17 color="#14171f" line-clamp=1
+        text voice.title font-family="Jost" font-size="1.0625rem" color="#14171f" line-clamp=1 text-overflow="ellipsis"
         if voice.description != ""
-          text voice.description font-family="Jost" font-size=14 color="#6b7080" line-clamp=1
+          text voice.description font-family="Jost" font-size="0.875rem" color="#626777" line-clamp=1 text-overflow="ellipsis"
       if voice.sample != ""
         button press=audition(voice.sample) aria-label=(playing ? "Stop sample" : "Hear sample") testId=`hear-${voice.id}` class=Round backgroundMaterial="glass"
           image (playing ? "symbol:stop-fill" : "symbol:play-fill") color="#14171f" width=13 height=13
       button press=choose(voice) testId=`use-${voice.id}` class=Chip height=40 padding="0 16px" min-width=64
         backgroundMaterial=(chosen ? "none" : "glass") background-color=(chosen ? "#14171f" : "rgba(20,23,31,0)")
-        text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=500 font-size=14 color=(chosen ? "#f4f2ec" : "#14171f")
+        text (chosen ? "✓ Selected" : "Use") font-family="Jost" font-weight=500 font-size="0.875rem" color=(chosen ? "#f4f2ec" : "#14171f")
 
 // The search field: a lit box with a glass, that lifts on focus and shows its own working —
 // a turning ring where the clear button sits, and a line sweeping along its foot.
@@ -1271,21 +1273,21 @@ component SearchField
     blur: action
     clear: action
   view
-    row position="relative" align-items="center" gap=12 width="100%" box-sizing="border-box" height=(big ? 60 : 54) padding="0 16px 0 18px"
+    row position="relative" align-items="center" gap=12 width="100%" box-sizing="border-box" min-height=(big ? "3.75rem" : "3.375rem") padding="0 16px 0 18px"
       border-radius=999 overflow="hidden" backgroundMaterial="glass"
       box-shadow=(focused ? "0 16px 36px -16px rgba(20,24,36,0.45)" : "0 10px 26px -16px rgba(20,24,36,0.3)")
       transition="box-shadow 260ms ease"
-      image "symbol:search" color=(focused ? "#14171f" : "#6b7080") width=20 height=20 flex-shrink=0
+      image "symbol:search" color=(focused ? "#14171f" : "#6b7080") width="1.25rem" height="1.25rem" flex-shrink=0
       // A text field with a search keyboard: the box draws its own glass and clear button.
       input type="text" inputmode="search" enterkeyhint="search" autocomplete="off" value=value input=edit submit=enter focus=focus blur=blur placeholder=hint
         aria-label=label testId=id flex=1 min-width=0 height="100%" box-sizing="border-box" appearance="none"
-        font-family="Jost" font-weight=300 font-size=(big ? 22 : 19) color="#14171f" background-color="transparent"
+        font-family="Jost" font-weight=300 font-size=(big ? "1.375rem" : "1.1875rem") color="#14171f" background-color="transparent"
         border="none" border-radius=0 padding=0 outline="none"
         ::placeholder
           color="#8a8f9c"
       if busy
         if still
-          text "Searching…" font-family="Jost" font-size=13 color="#6b7080" flex-shrink=0 testId=`${id}-busy`
+          text "Searching…" font-family="Jost" font-size="0.8125rem" color="#626777" flex-shrink=0 testId=`${id}-busy`
         else
           view width=18 height=18 box-sizing="border-box" border-radius=999 flex-shrink=0 testId=`${id}-busy`
             border="2px solid rgba(20,23,31,0.14)" border-top-color="#14171f" animation="spin 700ms linear infinite"
