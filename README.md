@@ -244,6 +244,13 @@ Register these clients, then set them for both the build (`app.json` `env`) and 
 | --- | --- | --- |
 | `GOOGLE_WEB_CLIENT_ID` | `exalt-web.apps.googleusercontent.com` | Google OAuth web client; redirect URI `<PUBLIC_URL>/sign-in/return` |
 | `GOOGLE_IOS_CLIENT_ID` | `exalt-ios.apps.googleusercontent.com` | Google OAuth iOS client |
+| `GOOGLE_IOS_URL_SCHEME` | `com.googleusercontent.apps.exalt-ios` | The iOS client's "iOS URL scheme" (its reversed client ID): the iPhone app's Google callback |
+| `APPLE_SERVICES_ID` | `app.exalt.audiobooks.web` | Sign in with Apple's Services ID; return URL `<PUBLIC_URL>/sign-in/return` |
+
+In the iPhone app, "Get started" opens a sheet of Apple's and Google's buttons. exact doesn't build
+either provider's native sign-in yet, so both run in the system browser sheet: Google through
+`@exact/oauth` (the server checks the access token at `POST /sign-in/google`), Apple through its web
+sign-in, whose return route sends the sheet back to `app.exalt.audiobooks:/signed-in`.
 
 Tests sign in with no network. `bun test server` checks tokens signed by Exact's fixture provider
 (`../exact/packages/sign-in/test/idp.mjs`). Under `--offline`, `SIGN_IN_TEST_KEYS=<keys file>`

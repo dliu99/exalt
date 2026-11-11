@@ -31,7 +31,9 @@
   "env": [
     "API_BASE_URL",
     "GOOGLE_WEB_CLIENT_ID",
-    "GOOGLE_IOS_CLIENT_ID"
+    "GOOGLE_IOS_CLIENT_ID",
+    "GOOGLE_IOS_URL_SCHEME",
+    "APPLE_SERVICES_ID"
   ],
   "commands": {
     "server": [

@@ -91,3 +91,43 @@ test('the web: a page we do not serve is never a return address', () => {
     expect(new URL(r.location!).origin).toBe('https://exalt.example');
   });
 });
+
+test('Google from the iPhone app: an access token Google issued to the iOS client opens a session; another app’s is refused', async () => {
+  const issued: Record<string, { aud: string; sub: string; email: string; name: string }> = {
+    'ios-token': { aud: 'exalt-ios.apps.googleusercontent.com', sub: 'g-42', email: 'grace@google.example', name: 'Grace Hopper' },
+    'other-token': { aud: 'another-app.apps.googleusercontent.com', sub: 'g-42', email: 'grace@google.example', name: 'Grace Hopper' },
+  };
+  const native = auth({
+    audiences: { apple: ['app.exalt.audiobooks'], google: ['exalt-web.apps.googleusercontent.com', 'exalt-ios.apps.googleusercontent.com'] },
+    publicUrl: 'http://127.0.0.1:8787', webOrigins: [], googleAccess: async (t) => issued[t] ?? null, now: () => clock,
+  });
+  const post = (token?: string) => new Request('http://x/sign-in/google', { method: 'POST', headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const done = await native.google(post('ios-token'));
+  expect(done).toMatchObject({ ok: true, name: 'Grace Hopper', email: 'grace@google.example' });
+  if (done.ok) expect(native.user(bearer(done.token))).toMatchObject({ provider: 'google', sub: 'g-42' });
+  expect(await native.google(post('other-token'))).toEqual({ ok: false, error: 'aud' });
+  expect(await native.google(post('forged'))).toEqual({ ok: false, error: 'token' });
+  expect(await native.google(post())).toEqual({ ok: false, error: 'no token' });
+});
+
+test('Apple from the iPhone app: the return route sends the sheet back to the app’s own scheme, and the app redeems the handle', async () => {
+  const APP = 'app.exalt.audiobooks:/signed-in';
+  const sheet = auth({
+    audiences: { apple: ['app.exalt.audiobooks', 'app.exalt.audiobooks.web'], google: [] },
+    publicUrl: 'http://127.0.0.1:8787', webOrigins: ['https://exalt.example'], appCallbacks: [APP],
+    keys: async () => (await idp.jwks(keys)).keys, now: () => clock,
+  });
+  const { nonce, client } = sheet.nonce({ callback: APP });
+  const id_token = await idp.sign(keys, { iss: 'https://appleid.apple.com', exp: Math.floor(clock / 1000) + 600, aud: 'app.exalt.audiobooks.web', nonce, sub: 'a-7', email: 'ada@apple.example' });
+  const back = await sheet.back('POST', { id_token, code: 'c', state: 'st', user: JSON.stringify({ name: { firstName: 'Ada', lastName: 'Apple' } }) });
+  expect(back.status).toBe(303);
+  expect(back.location!.startsWith(`${APP}?`)).toBe(true);
+  const relay = new URL(back.location!).searchParams.get('relay')!;
+  const credential = { type: 'identity', configURL: APPLE, token: { relay } };
+  expect(await sheet.identity({ credential, client, nonce })).toMatchObject({ ok: true, name: 'Ada Apple', email: 'ada@apple.example' });
+
+  // Another app's scheme is never a return address.
+  sheet.nonce({ callback: 'evil.app:/signed-in' });
+  const r = await sheet.back('GET', { error: 'access_denied', state: 'st' });
+  expect(r.location!.startsWith('evil.app')).toBe(false);
+});
