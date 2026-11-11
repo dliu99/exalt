@@ -32,6 +32,7 @@ const accounts = auth({
   audiences: { apple: [CLIENTS.appId, CLIENTS.appleWeb], google: [CLIENTS.googleWeb, CLIENTS.googleIos] },
   publicUrl: process.env.PUBLIC_URL ?? API,
   webOrigins: (process.env.WEB_ORIGINS ?? '').split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean),
+  appCallbacks: [CLIENTS.appCallback],
   googleSecret: process.env.GOOGLE_CLIENT_SECRET,
   ...(idp ? { keys: async (_p: Provider) => (await idp.jwks(testKeys)).keys, exchange: (code: string) => idp.exchange(testKeys, code) } : {}),
 });
@@ -58,6 +59,9 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     try { return send(await accounts.identity(await json(req))); } catch (e) { return fail(e); }
   } },
   // The web's return: Google redirects here (GET), Apple posts a form (POST).
+  '/sign-in/google': { OPTIONS: preflight, POST: async (req) => {
+    try { return send(await accounts.google(req)); } catch (e) { return fail(e); }
+  } },
   '/sign-in/return': {
     GET: async (req) => back(await accounts.back('GET', Object.fromEntries(new URL(req.url).searchParams))),
     POST: async (req) => {

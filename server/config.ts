@@ -5,5 +5,7 @@ export const CLIENTS = {
   appId: 'app.exalt.audiobooks',
   appleWeb: process.env.APPLE_SERVICES_ID ?? 'app.exalt.audiobooks.web',
   googleWeb: process.env.GOOGLE_WEB_CLIENT_ID ?? 'exalt-web.apps.googleusercontent.com',
+  // Where the iPhone app's sign-in sheet comes back to: app.ts's APP_CALLBACK.
+  appCallback: 'app.exalt.audiobooks:/signed-in',
   googleIos: process.env.GOOGLE_IOS_CLIENT_ID ?? 'exalt-ios.apps.googleusercontent.com',
 };

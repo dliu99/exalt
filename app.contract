@@ -332,6 +332,8 @@ component App
     send nonce = identityNonce()
   action googleSignIn
     send signedIn = signInWith("google")
+  action appleSignIn
+    send signedIn = signInWith("apple")
   action signOut
     send left = signOut()
     // A sheet still up is for the session that is ending: its answer is dropped.
@@ -414,6 +416,9 @@ component App
   action scrolled(x: number, y: number)
     scrollY = y
   action enter
+    // The app's sign-in sheet, if it is still up.
+    if app.ok
+      close("door-sheet")
     if top(nav).name == "lander"
       nav = push(nav, path("home"))
   action toDoor
@@ -605,10 +610,27 @@ component App
                 column gap=12 align-items="stretch" animation=(still ? "none" : "arrive 1s 0.45s cubic-bezier(.2,.7,.2,1) both")
                   if signInError != ""
                     text signInError color="#7a241c" font-family="Jost" font-size=14 text-align="center" testId="door-error"
-                  // The site needs Exact's button (it holds the popup at the press); the app's is its own, on glass.
+                  // The site needs Exact's button (it holds the popup at the press); the app's is its own, on glass,
+                  // and opens a sheet of the providers' own buttons: Apple's, then Google's.
                   if app.ok
-                    button press=googleSignIn testId="door-google" class=Chip height=58 border-radius=18 backgroundMaterial="glass" box-shadow="0 18px 40px -18px rgba(20,24,36,0.45)" -exact-press-haptic="impact-medium"
+                    button commandfor="door-sheet" command="show-modal" testId="door-start" class=Chip height=58 border-radius=18 backgroundMaterial="glass" box-shadow="0 18px 40px -18px rgba(20,24,36,0.45)" -exact-press-haptic="impact-medium"
                       text "Get started" font-family="system-ui" font-weight=600 font-size=17 color="#14171f"
+                    // A half sheet as tall as its content; our own buttons, so Apple's and Google's read in one type, the app's.
+                    dialog id="door-sheet" aria-label="Log in or sign up" testId="door-sheet"
+                      column gap=12 align-items="stretch" width=viewport.width box-sizing="border-box" padding="32px 20px calc(env(safe-area-inset-bottom) + 20px)"
+                        text "Log in or sign up" role="heading" aria-level=2 font-family="system-ui" font-weight=700 font-size=26 text-align="center" color="#14171f" margin-bottom=20
+                        button press=appleSignIn aria-label="Continue with Apple" testId="sheet-apple" class=Chip width="100%" height=56 border-radius=16 background-color="#000" gap=10 -exact-press-haptic="impact-light"
+                          image "symbol:sf/apple.logo" color="#fff" width=19 height=19
+                          text "Continue with Apple" font-family="system-ui" font-weight=600 font-size=17 color="#fff"
+                        button press=googleSignIn aria-label="Continue with Google" testId="sheet-google" class=Chip width="100%" height=56 border-radius=16 background-color="#fff" border="1px solid #d6d8de" gap=10 -exact-press-haptic="impact-light"
+                          svg viewBox="0 0 48 48" width=19 height=19 aria-hidden="true"
+                            path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                            path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                            path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                            path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                          text "Continue with Google" font-family="system-ui" font-weight=600 font-size=17 color="#14171f"
+                        if signInError != ""
+                          text signInError color="#7a241c" font-family="system-ui" font-size=14 text-align="center" testId="sheet-error"
                   else
                     exact-sign-in-button provider="google" theme="filled_black" shape="pill" press=googleSignIn testId="door-google" width="100%" height=52
             else
