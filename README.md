@@ -2,37 +2,54 @@
 
 A minimal, open audiobook app built with [Exact](https://github.com/expo/exact).
 
-- **One record per book.** Books come from Open Library (title, author, year, cover), keyed by
-  their work id. Every audiobook anyone makes of a book hangs off that one record.
-- **Make an audiobook** by selecting a LibGen EPUB/PDF (or an optional Z-Library source) or uploading an EPUB, PDF or TXT, then choosing a voice model. The
-  server splits the file into chapters, voices the whole book up front, and stores one audio
-  file per chapter.
-- **Listen.** A book's page shows a sample (the first chapter of its first finished
-  audiobook), every version people have made, and a link to its Goodreads reviews. The player
-  plays chapter after chapter.
+- **Import a book.** A signed-in person uploads their own EPUB, PDF or TXT and chooses a voice
+  model. The server splits the file into chapters, voices the whole book up front, and stores one
+  audio file per chapter. An EPUB's title, author and cover come from its package file.
+- **Your library.** Everything you import is yours: listed with its progress, renamed, shared or
+  kept private, deleted.
+- **Browse.** Each audiobook has a share switch, on by default. Shared, finished ones appear in a
+  public Browse feed with their cover, title and author, for anyone to play.
 
-Exalt opens on Sign in with Google: nothing is reachable without an account (the offline server used by tests leaves the door open).
+Exalt opens on Sign in with Google (the offline server used by tests leaves the door open).
 
-Audiobooks are public. The upload form asks the uploader to confirm the book is in the public
-domain or that they hold the rights to share it.
+Sharing asks the importer to confirm the book is in the public domain or that they hold the
+rights to share it; a private audiobook needs no confirmation and is played only by its owner,
+on signed URLs. Exalt has no book catalog and downloads no books: it narrates what you bring.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `app.contract` | The screens: library and search, book, new audiobook sheet, player |
+| `app.contract` | The screens: Browse, library, import sheet, player |
 | `app.ts` | The app's data module: talks to the server |
 | `app.test.contract` | Tests, run against the server in offline mode |
-| `server/index.ts` | Bun HTTP server: catalog, uploads, audio with byte ranges |
+| `server/index.ts` | Bun HTTP server: imports, library, Browse, covers, audio with byte ranges |
 | `server/auth.ts` | Accounts: checks Apple's and Google's ID tokens, issues session tokens |
-| `server/db.ts` | SQLite schema: `books`, `generations`, `tracks` |
+| `server/db.ts` | SQLite schema: `books`, `generations` (with `public`), `tracks`, `settings` |
+| `server/signing.ts` | Signed, expiring URLs for private audiobooks' audio and covers |
 | `server/places.ts` | Where each signed-in listener is in each audiobook, so their devices carry over |
-| `server/parse.ts` | EPUB / PDF / TXT to chapters, and chapters to chunks for TTS |
+| `server/parse.ts` | EPUB / PDF / TXT to chapters, an EPUB's title, author and cover, and chapters to chunks for TTS |
 | `server/tts.ts` | Text to speech through an OpenAI-compatible `/audio/speech` endpoint |
 | `server/encode.ts` | Compresses each narrated chapter to AAC in M4A with ffmpeg before it is stored |
 | `server/jobs.ts` | Durable SQLite queue, admission limits and chapter checkpoints |
-| `server/libgen.ts` | LibGen discovery, JSON metadata and verified downloads |
-| `server/storage.ts` | Local or S3-compatible chapter audio storage |
+| `server/storage.ts` | Local or S3-compatible chapter audio and cover storage |
+
+## Routes
+
+Signed-in routes take `Authorization: Bearer <token>`. Cover and audio `src` values are paths on
+the server (`/covers/…`, `/audio/…`); a private audiobook's carry `?exp=…&sig=…`.
+
+| Route | What it does |
+| --- | --- |
+| `POST /audiobooks?name=&model=&voice=&voiceName=&by=&title=&author=&public=1\|0&rights=1\|0` | The file is the body. Sharing (`public=1`, the default) needs `rights=1`. Answers `202 {ok, id}` |
+| `GET /browse?q=` | Shared, finished audiobooks, newest first (at most 100); `q` matches title or author |
+| `GET /me/audiobooks` | The signed-in person's audiobooks, every status, newest first |
+| `PATCH /me/audiobooks/:id` | `{public?, rights?, title?, author?}`; sharing needs `rights: true` |
+| `DELETE /me/audiobooks/:id` | Removes it, its audio, and its book and cover, even mid-narration |
+| `GET /generations/:id` | One audiobook and its chapters: shared ones for anyone, private ones for their owner |
+| `GET /audio/*`, `GET /covers/*` | Audio (byte ranges) and covers; private ones only on a valid signature |
+| `GET /me/places`, `PUT /me/places/:gen` | Listening places, below |
+| `GET /models`, `GET /voices` | Voice models and Fish Audio's voices |
 
 ## Run it
 
@@ -77,39 +94,22 @@ offline server: `bun exact.mjs test web`.
 | `MAX_BOOK_CHARACTERS` | 5000000 | Maximum extracted characters in one book |
 | `MAX_GENERATION_BYTES` | 2 GiB | Maximum stored (compressed) audio bytes for one generation |
 | `AUDIO_MAX_BYTES` | 8 GiB local; 0 with S3 | Cap on stored (compressed) chapter bytes; 0 means no aggregate cap |
-| `LIBGEN_ENABLED` | `1` | Set to `0` to disable LibGen search and downloads |
-| `LIBGEN_MIRRORS` | `https://libgen.li,https://libgen.bz` | Comma-separated trusted HTTPS origins |
-| `LIBGEN_DOWNLOAD_ORIGINS` | none | Additional exact trusted HTTPS origins for file redirects |
+| `AUDIO_SIGNING_KEY` | generated once, kept in SQLite `settings` | HMAC key for private audio and cover URLs; changing it ends links already handed out |
 | `GOOGLE_CLIENT_SECRET` | none | The Google web client's secret, for the web sign-in's code exchange |
 | `PUBLIC_URL` | `API_BASE_URL` | The server's public address (the web sign-in's return route is under it) |
 | `WEB_ORIGINS` | none | The site's origins, comma-separated, that the web sign-in may return to (loopback ones always may) |
-
-## LibGen search and downloads
-
-LibGen is enabled by default, with no account or API key. Search includes its EPUB/PDF
-results alongside the metadata catalog; `BOOK_PROVIDER=libgen` searches it alone. On a
-book's **New Audiobook** sheet, choose a file under **Download**, select a voice, confirm
-sharing rights and press **Make**. The server responds with a generation ID immediately
-(`202`); the worker downloads and verifies the file before narration. Source failures appear
-on the book's generation status. Uploads remain available.
-
-The adapter uses HTML search, `json.php` for edition/file details, and the download landing
-page to resolve a short-lived link. Requests have timeouts, bounded responses and mirror
-fallback. Repeated searches coalesce and cache for ten minutes, with four concurrent
-upstream searches allowed. Only EPUB/PDF downloads under 50 MiB are accepted, redirect
-hosts are checked (configured mirrors and numbered `cdn*.booksdl.lc` download hosts), and downloaded bytes must match the selected MD5. Mirror HTML and
-availability can change; this is an optional external provider, not an uptime guarantee.
 
 ## Storage and backend capacity
 
 | Data | Storage | Retention |
 | --- | --- | --- |
-| Book metadata, accounts, hashed sessions, source IDs/hashes, narration settings and progress | SQLite at `DB` | Retained |
-| Queued source reference or extracted chapter text | SQLite `generation_jobs` | Removed on completion or failure |
+| Book metadata, accounts, hashed sessions, source hashes, share switch, narration settings and progress | SQLite at `DB` | Retained until the audiobook is deleted |
+| Extracted chapter text | SQLite `generation_jobs` | Removed on completion, failure or deletion |
 | Source EPUB/PDF/TXT | Worker/request memory, at most 50 MiB per file | Discarded after parsing; never archived |
 | Incomplete chapter audio (raw PCM or MP3) | `AUDIO_DIR/.tmp` | Removed after compression and upload, or failure; interrupted chapter is overwritten on resume |
-| Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained and shared by listeners |
-| Listening position | The listener's device; for a signed-in listener also SQLite `places` (chapter, time, when), newest wins | Device: until cleared. Server: retained, a finished book's row marked finished |
+| Finished chapter audio (M4A) | Persistent local disk or S3-compatible bucket | Retained until its audiobook is deleted |
+| Covers (an EPUB's cover image, at most 5 MB, JPEG/PNG/WebP/GIF) | `AUDIO_DIR/covers/<book>.<ext>` or bucket key `covers/<book>.<ext>` | Retained until its book is deleted |
+| Listening position | The listener's device; for a signed-in listener also SQLite `places` (chapter, time, when), newest wins | Device: until cleared. Server: retained, a finished book's row marked finished; removed with its audiobook |
 | Voice preference | The listener's device | Until cleared |
 
 The backend runs **one instance and one generation worker**. SQLite is a durable queue:
@@ -118,8 +118,8 @@ repeat TTS calls; completed chapters do not. New jobs are capped at 20 pending g
 two per account. Concurrent upload parsing is capped at two. Books default to a limit of five
 million extracted characters, and each generated audiobook to 2 GiB stored. EPUB expansion is
 bounded and chapter audio is written to scratch chunk by chunk, rather than accumulated
-in memory. Transient TTS failures retry up to three attempts. The same source, book, model
-and voice reuse an existing queued/working/ready generation instead of generating again.
+in memory. Transient TTS failures retry up to three attempts. Every import is narrated as its
+own audiobook. Deleting one mid-narration stops the worker at its next chunk.
 
 ### Audio format and size
 
@@ -142,9 +142,9 @@ books), and a bucket of 1,000 such books is about 150 GB.
 
 The Render blueprint mounts a 10 GB persistent disk. The default 8 GiB audio cap and a
 256 MiB free-space check stop work before normal audio growth consumes the disk; queue,
-metadata, scratch, WAL and backups also need space. Failed versions may retain completed
+metadata, scratch, WAL and backups also need space. Failed audiobooks may retain completed
 chapters for playback and count against the cap. Audio has no automatic eviction: monitor
-storage and expand it or remove obsolete versions operationally. Back up SQLite and local
+storage and expand it, or delete audiobooks (`DELETE /me/audiobooks/:id`). Back up SQLite and local
 audio together. Queue payload deletion is logical cleanup; backups can retain earlier data.
 This is a bounded single-server deployment, not horizontal generation scaling. Multiple API
 instances/workers require a shared database and job-claiming/lease design first.
@@ -164,8 +164,8 @@ AUDIO_S3_SECRET_ACCESS_KEY=your-server-secret-key
 
 Use the actual AWS region for AWS S3. Keys remain server-side. The worker writes a chapter
 locally, compresses it, uploads it to `audio/<generation>/<chapter>.m4a` (`audio/mp4`), then publishes the
-track row and deletes the scratch copy. `/audio/...` redirects S3 tracks to a signed GET URL
-valid for one hour, so the bucket serves playback/byte ranges directly. Configure bucket
+track row and deletes the scratch copy. Covers go to `covers/<book>.<ext>`. `/audio/...` and
+`/covers/...` check access, then redirect S3 objects to a signed GET URL valid for one hour, so the bucket serves playback/byte ranges directly. Configure bucket
 CORS to allow the app's origins, GET/HEAD, the Range header, and exposure of Content-Range,
 Accept-Ranges and Content-Length. Objects keep the content type they were uploaded with,
 so older `.mp3` and `.wav` objects still play.
@@ -188,55 +188,24 @@ about **576 MB**. Actual provider output determines the size. The default 2 GiB 
 cap stops larger output; PCM/WAV reaches it much sooner. One stored version serves every
 listener; playback does not trigger fresh TTS calls.
 
-## Z-Library search and downloads
-
-Connect an existing Z-Library session on the **server**:
-
-```bash
-ZLIBRARY_BASE_URL=https://your-working-domain.example
-ZLIBRARY_USER_ID=your_remix_userid_cookie
-ZLIBRARY_USER_KEY=your_remix_userkey_cookie
-```
-
-Use the HTTPS origin of your working Z-Library domain, and the `remix_userid` and
-`remix_userkey` cookies from your signed-in browser session. Keep these values in the
-server environment, alongside `OPENROUTER_API_KEY`; never add them to `app.json` or a client build.
-This uses Z-Library's unofficial mobile EAPI, whose availability and domains can change.
-Protocol references: [KOReader client](https://github.com/ZlibraryKO/zlibrary.koplugin) and
-[EAPI client documentation](https://github.com/heartleo/zlib/blob/main/docs/eapi.md).
-
-Search includes Z-Library books alongside the configured metadata catalog, merging editions.
-You can also set `BOOK_PROVIDER=zlibrary` to search it alone. Open a book, choose **New
-Audiobook**, select a Z-Library file, choose the voice, confirm sharing rights, and press
-**Make**. The durable worker downloads the selected EPUB/PDF, extracts chapters, and sends their
-text through the OpenRouter TTS queue. Uploads remain available when no download
-is found or Z-Library is disconnected.
-
-The session belongs to the server: every signed-in creator uses that account's download
-allowance. Expired sessions, quota limits and unavailable downloads return an error on the
-creation sheet. No download happens until the creator confirms Make. Files are limited to
-50 MiB for processing. If your domain serves downloads through another trusted HTTPS origin, list its
-exact origin in `ZLIBRARY_DOWNLOAD_ORIGINS` (comma-separated); redirects are checked and
-session credentials are sent only to `ZLIBRARY_BASE_URL`.
-
 ## Accounts
 
 Sign in with Google, as `../exact/docs/recipes/sign-in.md` describes. The app shows Google's own
-button on the lander, Home and the New Audiobook sheet (`server/auth.ts` can also check Apple's
-tokens, but the app offers no Apple button for now). It asks the server for a single-use nonce, and
+button on the lander, Library and the Import sheet; in the iPhone app the sheet also offers Apple
+(below). It asks the server for a single-use nonce, and
 the provider signs an ID token over that nonce. `server/auth.ts` checks the token's signature
 against the provider's published keys, along with its issuer, audience, expiry and nonce. Then it
 answers a session token of Exalt's own: the app keeps it in its secret store and sends it as a
-bearer token. `POST /books/:id/generations` needs one, and each audiobook records the account
+bearer token. `POST /audiobooks` needs one, and each audiobook records the account
 that made it (`generations.user_id`). On the web, the provider returns to `/sign-in/return` on the
 server, which hands the page a single-use handle for the token.
 
 A signed-in listener's place in each audiobook follows them between devices. The player saves it
 every 15 seconds while it plays, at a pause and at a chapter's change; `app.ts` keeps it on the
-device and, with a session, sends it to `PUT /me/places/:gen`. Home and the player read
+device and, with a session, sends it to `PUT /me/places/:gen`. The Library, the dock and the player read
 `GET /me/places` and take the newest of the device's and the server's places for each audiobook, by
 when it was heard (a device clock ahead of the server's counts as the server's now). A book finished
-on one device leaves the others' shelves. Signed out, places stay on the device and are never sent.
+on one device leaves the others' Library and dock. Signed out, places stay on the device and are never sent.
 
 Register these clients, then set them for both the build (`app.json` `env`) and the server:
 
@@ -256,7 +225,7 @@ Tests sign in with no network. `bun test server` checks tokens signed by Exact's
 (`../exact/packages/sign-in/test/idp.mjs`). Under `--offline`, `SIGN_IN_TEST_KEYS=<keys file>`
 makes the server trust that provider's key instead of Apple's and Google's.
 
-`bun server/index.ts --offline` searches a two-book fixture and voices with silence, so it works
+`bun server/index.ts --offline` voices with silence (the `exalt/silence` model), so it works
 without a network or a key.
 
 ## OpenRouter speech
@@ -271,7 +240,7 @@ and saved as one WAV per chapter; the others are MP3. Run the server from the re
 
 - **Streaming generation.** Voice a chapter when someone first plays it and keep it for
   everyone. This costs less than voicing whole books, and fits a free model that may not stay free.
-- Let people remove their own versions, and cap how many each account makes per day.
-- Ratings of versions; reviews beside the Goodreads link.
+- Cap how many audiobooks each account makes per day.
+- Read PDF metadata (title, author) as EPUB's is read.
 - Shared database and leased worker jobs for horizontal generation scaling.
 - Audio retention/deletion controls and storage usage reporting.

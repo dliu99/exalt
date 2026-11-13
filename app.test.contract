@@ -7,122 +7,103 @@ test "the lander shows one book at a time, and turns through the stack"
   tap "stack"
   expect text "great-title" == "Selected Writings"
 
-test "a book on the lander opens the library searching for it"
+test "a book on the lander opens Browse narrowed to its title"
   clock data
   tap "stack"
   tap "seek"
   clock data
-  expect state asked == "Meditations Marcus Aurelius"
-  expect tree has "search"
+  clock settle
+  expect tree has "browse"
+  expect state browseQuery == "Meditations"
+  expect state browseAsked == "Meditations"
+  expect text "browse-search" == "Meditations"
+  expect tree has "browse-empty"
 
-test "below the fold, the lander says what Exalt is and opens the library"
+test "below the fold, the lander says what Exalt is and opens Browse"
   clock data
-  expect tree has "about"
-  expect tree missing "lander-apple"
+  expect text "about" == "Import a book you own, and Exalt reads it aloud in a voice you choose."
   expect tree has "lander-google"
-  tap "lander-library"
+  tap "lander-browse"
   clock data
-  expect tree has "home"
-  expect tree has "no-places"
-  expect tree has "home-explore"
+  clock settle
+  expect tree has "browse"
 
-test "an empty library says how to start"
+test "an empty library says to import a book"
   clock data
   tap "enter"
   clock data
-  expect tree has "app"
-  expect tree missing "book-OL1W"
+  clock settle
+  expect text "home-title" == "Library"
+  expect tree has "library-empty"
+  expect tree has "library-import"
+  expect tree has "library-google"
+  expect tree has "import"
+  expect tree missing "account-button"
 
-test "search finds a book and opens its page"
+test "the import sheet shares by default and waits for a file and the right to share"
+  clock data
   tap "enter"
-  tap "nav-explore"
-  type "search" "rivers"
-  type "search" key "Enter"
   clock data
-  expect tree has "book-OL2W"
-  tap "book-OL2W"
+  tap "library-import"
   clock data
-  expect text "book-title" == "Notes on Rivers"
-  expect tree has "no-versions"
-  expect tree has "goodreads"
-  expect tree missing "book-description"
-
-test "making an audiobook waits for a file and consent"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "harbour"
-  type "search" key "Enter"
-  clock data
-  tap "book-OL1W"
-  clock data
-  expect text "book-description" == "A test book about a harbour."
-  tap "make"
-  clock data
-  expect state model == "exalt/silence"
+  clock settle
+  expect tree has "import-sheet"
+  expect state model == ""
+  expect state chosenModel == "exalt/silence"
+  expect state share == true
   expect state rights == false
-  expect state canCreate == false
+  expect disabled "narrate"
+  expect text "file-name" == "Choose…"
+  expect text "share-note" == "Anyone can listen in Browse. Only share books you have the right to."
+  expect text "import-hint" == "Sign in to narrate."
+  expect tree has "rights"
+  tap "rights"
+  expect state rights == true
+  expect disabled "narrate"
+  tap "import-cancel"
+  clock settle
+  expect tree has "library-empty"
 
-test "making an audiobook asks for an account, with Google's button"
+test "keeping a book private asks for no right to share"
+  clock data
   tap "enter"
-  tap "nav-explore"
-  type "search" "harbour"
-  type "search" key "Enter"
   clock data
-  tap "book-OL1W"
+  tap "import"
   clock data
-  tap "make"
-  clock data
-  expect tree has "sign-in-note"
-  expect tree missing "apple-sign-in"
-  expect tree has "google-sign-in"
-  expect text "sign-in-note" == "Sign in to make an audiobook. Listening needs no account."
-  expect tree missing "account"
-  expect tree missing "sign-out"
-  expect tree missing "model"
+  clock settle
+  tap "share"
+  expect state share == false
   expect tree missing "rights"
-  expect tree missing "create-save"
+  expect text "share-note" == "Only you can listen. You can share it later from your library."
+  tap "share"
+  expect state share == true
+  expect tree has "rights"
+  expect state rights == false
+
+test "signed out, the import sheet offers the way in"
+  clock data
+  tap "enter"
+  clock data
+  tap "import"
+  clock data
   clock settle
-  tap "create-cancel"
+  expect tree has "import-signed-out"
+  expect tree has "import-google"
+
+test "browse says when nothing is shared, and when nothing matches"
+  clock data
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
   clock settle
-  expect text "book-title" == "A Quiet Harbour"
-
-test "typing suggests books under the field, and one opens its page"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "r"
-  clock +300
+  expect text "browse-title" == "Browse"
+  expect tree has "browse-empty"
+  type "browse-search" "harbour"
+  clock +400
   clock data
-  expect tree missing "suggestions"
-  type "search" "rivers"
-  clock +100
-  expect tree missing "suggestions"
-  clock +300
-  clock data
-  expect tree has "suggest-OL2W"
-  expect tree missing "book-OL2W"
-  tap "suggest-OL2W"
-  clock data
-  expect text "book-title" == "Notes on Rivers"
-
-test "enter shows every result and closes the suggestions"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "rivers"
-  clock +300
-  clock data
-  expect tree has "suggestions"
-  type "search" key "Enter"
-  clock data
-  expect tree missing "suggestions"
-  expect tree has "book-OL2W"
-
-test "explore is only the search field until something is asked"
-  clock data
-  tap "enter"
-  tap "nav-explore"
-  clock data
-  expect tree has "search"
-  expect tree missing "canon-9780141442433"
+  expect state browseAsked == "harbour"
+  expect tree has "browse-empty"
 
 test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
@@ -132,40 +113,10 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   clock data
   expect tree has "voice-v-reader"
   expect text "use-v-reader" == "Use"
+  expect tree missing "voices-back"
   tap "use-v-reader"
   clock data
   expect text "use-v-reader" == "✓ Selected"
   tap "nav-home"
   clock data
   expect tree has "home"
-
-test "signed out, making an audiobook shows only the sign-in, not the form"
-  tap "enter"
-  tap "nav-explore"
-  type "search" "harbour"
-  type "search" key "Enter"
-  clock data
-  tap "book-OL1W"
-  clock data
-  tap "make"
-  clock data
-  expect tree has "create-signed-out"
-  expect tree missing "book-source"
-  expect tree missing "choose-file"
-  expect tree missing "me"
-  expect tree missing "create-hint"
-
-test "a search settles to its books, and the field clears"
-  tap "enter"
-  tap "nav-explore"
-  expect tree missing "search-clear"
-  type "search" "rivers"
-  type "search" key "Enter"
-  clock data
-  expect tree missing "searching"
-  expect tree missing "search-busy"
-  expect tree has "book-OL2W"
-  tap "search-clear"
-  expect state query == ""
-  expect state asked == ""
-  expect tree missing "book-OL2W"

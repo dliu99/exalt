@@ -70,6 +70,48 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
   });
 }
 
+// What an import says of itself: an EPUB's title, first author and cover image. A cover is read
+// in its own bounded pass (parseEpub skips images) and kept only when its bytes are a JPEG, PNG,
+// WebP or GIF.
+export type BookMeta = { title: string; author: string; cover: { bytes: Uint8Array; ext: 'jpg' | 'png' | 'webp' | 'gif' } | null };
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
+
+export function bookMeta(name: string, bytes: Uint8Array): BookMeta {
+  const none = { title: '', author: '', cover: null };
+  if (name.toLowerCase().split('.').pop() !== 'epub') return none;
+  try {
+    const files = unzipSync(bytes, { filter: (f) => /\.(xml|opf)$/i.test(f.name) && f.originalSize <= 8 * 1024 * 1024 });
+    const read = (path: string) => (files[path] ? strFromU8(files[path]) : '');
+    const opfPath = attr(read('META-INF/container.xml').match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
+    const opf = read(opfPath);
+    if (!opf) return none;
+    const text = (tag: string) => tidy(htmlText(opf.match(new RegExp(`<dc:${tag}\\b[^>]*>([\\s\\S]*?)</dc:${tag}>`, 'i'))?.[1] ?? '')).slice(0, 200);
+    const base = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+    const items = (opf.match(/<item\b[^>]*>/gi) ?? []).map((tag) => ({ id: attr(tag, 'id'), href: attr(tag, 'href'), type: attr(tag, 'media-type'), props: attr(tag, 'properties') }));
+    const metaCover = (opf.match(/<meta\b[^>]*>/gi) ?? []).find((tag) => attr(tag, 'name') === 'cover');
+    const item = items.find((i) => i.props.split(/\s+/).includes('cover-image'))
+      ?? (metaCover ? items.find((i) => i.id === attr(metaCover, 'content')) : undefined)
+      ?? items.find((i) => (i.type.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(i.href)) && /cover/i.test(i.id + i.href));
+    let cover: BookMeta['cover'] = null;
+    if (item?.href) {
+      const path = base + decodeURIComponent(item.href.split('#')[0]);
+      const found = unzipSync(bytes, { filter: (f) => f.name === path && f.originalSize <= MAX_COVER_BYTES })[path];
+      const ext = found && found.length <= MAX_COVER_BYTES ? imageType(found) : null;
+      if (found && ext) cover = { bytes: found, ext };
+    }
+    return { title: text('title'), author: text('creator'), cover };
+  } catch { return none; }
+}
+
+function imageType(b: Uint8Array): 'jpg' | 'png' | 'webp' | 'gif' | null {
+  const ascii = (from: number, to: number) => String.fromCharCode(...b.subarray(from, to));
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b[0] === 0x89 && ascii(1, 4) === 'PNG') return 'png';
+  if (ascii(0, 4) === 'GIF8') return 'gif';
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'webp';
+  return null;
+}
+
 async function parsePdf(bytes: Uint8Array): Promise<Chapter[]> {
   const { extractText, getDocumentProxy } = await import('unpdf');
   const { text } = await extractText(await getDocumentProxy(bytes), { mergePages: false });

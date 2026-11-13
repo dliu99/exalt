@@ -1,24 +1,25 @@
 // One durable worker per server. Completed chapters survive restarts; only the interrupted
-// chapter is regenerated. Text is removed when a job finishes or fails.
-import { createHash } from 'node:crypto';
+// chapter is regenerated. Text is removed when a job finishes or fails. An audiobook deleted
+// while it is being made stops at its next chapter, and what it was writing is cleaned up.
 import { open } from 'node:fs/promises';
 import { rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { db, tracksOf, type GenerationRow } from './db.ts';
-import { type Chapter, chunks, parseBook } from './parse.ts';
+import { db, getBook, getGeneration, tracksOf, type GenerationRow } from './db.ts';
+import { type Chapter, chunks } from './parse.ts';
 import { speak } from './tts.ts';
 import { compress, requireEncoder, STORED_BYTES_PER_SECOND } from './encode.ts';
-import { AUDIO_DIR, SCRATCH_DIR, requireDiskSpace, saveAudio, storageKind } from './storage.ts';
+import { AUDIO_DIR, SCRATCH_DIR, audioDir, removeAudio, removeCover, requireDiskSpace, saveAudio, storageKind } from './storage.ts';
 import { MAX_TEXT_CHARS, MAX_GENERATION_BYTES } from './limits.ts';
-import { lg } from './libgen.ts';
-import { zlib } from './zlibrary.ts';
 export { AUDIO_DIR } from './storage.ts';
 
 const MAX_QUEUE = 20, MAX_PER_USER = 2;
 const MAX_AUDIO_BYTES = Number(process.env.AUDIO_MAX_BYTES ?? (storageKind === 'local' ? 8 * 1024 ** 3 : 0));
 if (!Number.isSafeInteger(MAX_AUDIO_BYTES) || MAX_AUDIO_BYTES < 0) throw new Error('AUDIO_MAX_BYTES must be a nonnegative integer.');
 export class QueueFull extends Error {}
-export type Payload = { source: string; offline?: boolean } | { chapters: Chapter[] };
+export type Payload = { chapters: Chapter[] };
+// The audiobook was deleted while it was being made.
+class Gone extends Error {}
+const exists = (id: number) => !!db.query('SELECT 1 FROM generations WHERE id = ?').get(id);
 let running = false;
 
 // Backfill byte counts for audio created by earlier versions, so capacity limits include it.
@@ -42,22 +43,17 @@ function overLimit(id: number, adding: number) {
   const all = (db.query('SELECT COALESCE(SUM(bytes), 0) AS n FROM tracks').get() as { n: number }).n;
   return total + adding > MAX_GENERATION_BYTES || (MAX_AUDIO_BYTES > 0 && all + adding > MAX_AUDIO_BYTES);
 }
-// Reserve a slot before reading uploads or resolving a remote source; concurrent requests
-// cannot all pass admission checks and then allocate a full book each.
-export const reserve = db.transaction((g: { book: string; user: number; by: string; model: string; voice: string; voiceName: string; name: string; source: string }) => {
-  if (g.source) {
-    const existing = db.query(`SELECT id FROM generations WHERE book_id = ? AND source_ref = ? AND model = ? AND voice = ? AND status IN ('queued', 'working', 'ready') ORDER BY id LIMIT 1`)
-      .get(g.book, g.source, g.model, g.voice) as { id: number } | null;
-    if (existing) return { id: existing.id, reused: true };
-  }
+// Reserve a slot before reading the upload; concurrent requests cannot all pass admission
+// checks and then allocate a full book each.
+export const reserve = db.transaction((g: { book: string; user: number; by: string; model: string; voice: string; voiceName: string; name: string; public: boolean }) => {
   checkCapacity();
   const count = db.query("SELECT COUNT(*) AS n FROM generations WHERE status IN ('queued', 'working')").get() as { n: number };
   if (count.n >= MAX_QUEUE) throw new QueueFull('The audiobook queue is full. Try again later.');
   const own = db.query("SELECT COUNT(*) AS n FROM generations WHERE user_id = ? AND status IN ('queued', 'working')").get(g.user) as { n: number };
   if (own.n >= MAX_PER_USER) throw new QueueFull('You already have two audiobooks being made. Wait for one to finish.');
-  const result = db.query(`INSERT INTO generations (book_id, user_id, made_by, model, voice, voice_name, source_name, source_ref, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(g.book, g.user, g.by.slice(0, 40), g.model, g.voice, g.voiceName, g.name, g.source, Date.now());
-  return { id: Number(result.lastInsertRowid), reused: false };
+  const result = db.query(`INSERT INTO generations (book_id, user_id, made_by, model, voice, voice_name, source_name, public, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(g.book, g.user, g.by.slice(0, 40), g.model, g.voice, g.voiceName, g.name.slice(0, 200), g.public ? 1 : 0, Date.now());
+  return Number(result.lastInsertRowid);
 });
 export function failJob(id: number, e: unknown) {
   db.transaction(() => {
@@ -65,31 +61,43 @@ export function failJob(id: number, e: unknown) {
     db.query('DELETE FROM generation_jobs WHERE generation_id = ?').run(id);
   })();
 }
+// An audiobook gone with everything of it: its queued text, tracks and their audio, listeners'
+// places, and its book and cover when no other audiobook has them. A worker making it stops at its
+// next chunk or chapter (run checks), and removes a chapter it stores meanwhile.
+export async function removeAudiobook(id: number) {
+  const g = getGeneration(id);
+  if (!g) return;
+  const tracks = tracksOf(id);
+  let cover = '';
+  db.transaction(() => {
+    db.query('DELETE FROM generation_jobs WHERE generation_id = ?').run(id);
+    db.query('DELETE FROM tracks WHERE generation_id = ?').run(id);
+    db.query('DELETE FROM places WHERE generation_id = ?').run(id);
+    db.query('DELETE FROM generations WHERE id = ?').run(id);
+    const book = getBook(g.book_id);
+    if (book && !db.query('SELECT 1 FROM generations WHERE book_id = ? LIMIT 1').get(book.id)) {
+      db.query('DELETE FROM books WHERE id = ?').run(book.id);
+      if (!db.query('SELECT 1 FROM books WHERE cover = ? LIMIT 1').get(book.cover)) cover = book.cover;
+    }
+  })();
+  await Promise.all(tracks.map((t) => removeAudio(t.file, t.storage).catch(() => {})));
+  rmSync(audioDir(id), { recursive: true, force: true });
+  const file = /^\/covers\/([^/?]+)$/.exec(cover)?.[1];
+  if (file) await removeCover(file).catch(() => {});
+}
 function validateChapters(chapters: Chapter[]) {
   if (!chapters.length || chapters.reduce((n, c) => n + c.text.length + c.title.length, 0) > MAX_TEXT_CHARS)
     throw new Error(`Books must contain readable text and be under ${MAX_TEXT_CHARS.toLocaleString('en-US')} characters.`);
 }
 export function enqueue(id: number, payload: Payload) {
-  if ('chapters' in payload) validateChapters(payload.chapters);
+  validateChapters(payload.chapters);
   db.query('INSERT OR REPLACE INTO generation_jobs (generation_id, payload) VALUES (?, ?)').run(id, JSON.stringify(payload));
   if (!running) void drain();
 }
-async function loadChapters(id: number, payload: Payload): Promise<Chapter[]> {
-  if ('chapters' in payload) return payload.chapters;
-  let source;
-  if (payload.offline) {
-    source = { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode('A quiet harbour opens onto a wide river where the ships come and go each morning and the people gather to watch them sail.') };
-  } else if (payload.source.startsWith('lg-')) source = await lg.download(payload.source);
-  else if (payload.source.startsWith('zl-')) source = await zlib.download(payload.source);
-  else throw new Error('No such book source.');
-  const chapters = await parseBook(source.name, source.bytes);
-  validateChapters(chapters);
-  const hash = createHash('sha256').update(source.bytes).digest('hex');
-  db.transaction(() => {
-    db.query('UPDATE generations SET source_name = ?, source_hash = ? WHERE id = ?').run(source.name, hash, id);
-    db.query('UPDATE generation_jobs SET payload = ? WHERE generation_id = ?').run(JSON.stringify({ chapters }), id);
-  })();
-  return chapters;
+function loadChapters(payload: Partial<Payload> & { source?: string }): Chapter[] {
+  // Jobs queued from a book download, before Exalt stopped downloading books.
+  if (!Array.isArray(payload.chapters)) throw new Error('This audiobook was queued from a book download, which Exalt no longer makes. Import the file instead.');
+  return payload.chapters;
 }
 async function drain() {
   running = true;
@@ -100,7 +108,7 @@ async function drain() {
       try {
         db.query("UPDATE generations SET status = 'working' WHERE id = ?").run(row.id);
         checkCapacity();
-        await run(row, await loadChapters(row.id, JSON.parse(row.payload)));
+        await run(row, loadChapters(JSON.parse(row.payload)));
         db.transaction(() => {
           db.query("UPDATE generations SET status = 'ready', error = '' WHERE id = ?").run(row.id);
           db.query('DELETE FROM generation_jobs WHERE generation_id = ?').run(row.id);
@@ -114,12 +122,14 @@ async function run(g: GenerationRow, chapters: Chapter[]) {
   db.query('UPDATE generations SET total = ?, done = ? WHERE id = ?').run(chapters.length, done.size, g.id);
   for (const [idx, chapter] of chapters.entries()) {
     if (done.has(idx)) continue;
+    if (!exists(g.id)) throw new Gone();
     const path = join(SCRATCH_DIR, `${g.id}-${idx}.partial`);
     const file = await open(path, 'w');
     // A chapter is raw PCM (its parts' samples) or MP3 (its parts' frames) until it is compressed.
     let pcm: boolean | undefined, rate = 0, raw = 0;
     try {
       for (const text of chunks(`${chapter.title}. ${chapter.text}`)) {
+        if (!exists(g.id)) throw new Gone();
         checkCapacity();
         const v = await speak(g.model, g.voice, text);
         const thisRate = v.ext === 'wav' ? new DataView(v.audio.buffer, v.audio.byteOffset, 44).getUint32(24, true) : v.rate ?? 0;
@@ -137,6 +147,7 @@ async function run(g: GenerationRow, chapters: Chapter[]) {
       if (overLimit(g.id, stored.bytes)) throw new Error('The audiobook reached the audio storage limit.');
       const name = `${g.id}/${idx}.${stored.ext}`;
       const storage = await saveAudio(name, stored.path);
+      if (!exists(g.id)) { await removeAudio(name, storage).catch(() => {}); throw new Gone(); }
       db.transaction(() => {
         db.query('INSERT OR REPLACE INTO tracks (generation_id, idx, title, file, bytes, storage) VALUES (?, ?, ?, ?, ?, ?)').run(g.id, idx, chapter.title, name, stored.bytes, storage);
         db.query('UPDATE generations SET done = done + 1 WHERE id = ?').run(g.id);

@@ -19,17 +19,10 @@ services:
         value: /var/data/data.db
       - key: AUDIO_MAX_BYTES
         value: "8589934592"
-      - key: LIBGEN_ENABLED
-        value: "1"
-      - key: LIBGEN_MIRRORS
-        value: https://libgen.li,https://libgen.bz
       # Optional AUDIO_S3_* settings are documented in README; leave unset for local audio.
-      - key: BOOK_PROVIDER
-        value: google
-      - key: HARDCOVER_API_KEY
-        sync: false
-      - key: GOOGLE_BOOKS_API_KEY
-        sync: false
+      # Signs private audiobooks' audio and cover URLs; generated once by Render and kept.
+      - key: AUDIO_SIGNING_KEY
+        generateValue: true
       - key: OPENROUTER_API_KEY
         sync: false
       # Accounts (README "Accounts"): the registered sign-in clients, and where the site is.
