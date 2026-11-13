@@ -1108,7 +1108,7 @@ component App
                         text preview.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="light-dark(#6b7080, #6b7080)" text-align="center" testId="add-author"
                   column testId="add-chapters"
                     text `${preview.chapters.length} ${preview.chapters.length == 1 ? "chapter" : "chapters"}` font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" padding-bottom=6
-                    for c, i in preview.chapters.slice(0, 40) key=i
+                    for c, i in preview.chapters key=i
                       row gap=14 padding="9px 0" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))"
                         text `${i + 1}` font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" width="1.75rem" font-variant-numeric="tabular-nums"
                         text c font-size="0.9375rem" color="light-dark(#14171f, #14171f)" flex=1 min-width=0 line-clamp=1
