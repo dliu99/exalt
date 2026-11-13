@@ -250,7 +250,9 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
         ? `data:${COVER_TYPES[meta.cover.ext]};base64,${Buffer.from(meta.cover.bytes).toString('base64')}` : '';
       // What was read is kept for Generate (kept.ts): `token` takes it, with no second upload or download.
       const token = keep(me.id, kept);
-      return send({ ok: true, error: '', title, author: meta.author.slice(0, 200), cover, chapters: chapters.map((c) => c.title), token });
+      return send({ ok: true, error: '', title, author: meta.author.slice(0, 200), cover, chapters: chapters.map((c) => c.title), token,
+        // About how many words, from the text's length, as the app estimates a book it reads itself.
+        words: Math.round(chapters.reduce((n, c) => n + c.text.length, 0) / 6) });
     } catch (e) {
       return send({ ok: false, error: String((e as Error).message ?? e) }, 400);
     } finally { uploading--; }

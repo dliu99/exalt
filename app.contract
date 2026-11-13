@@ -130,6 +130,8 @@ shape ImportPreview
   author: string
   cover: string
   chapters: string[]
+  // About how many words the book holds, for its reading time and pages.
+  words: number
   // What the server kept of a file it read (a link's download), so Generate needn't fetch it again; "" when the phone read it.
   token: string
 
@@ -310,10 +312,13 @@ component App
   derive modelName = match first(models.filter(m => m.id == chosenModel)) { case some(m) => match m.name.split(" (").at(0) { case some(n) => n.replaceAll("Fish Audio ", ""), case none => m.name }, case none => "Model" }
   derive voiceName = fishModel ? (voicePref.id == "" ? "Default" : voicePref.title) : (voice == "" ? "Default" : voice)
   derive adding = filePath != "" or linkTaken != ""
+  // About how long the book takes to hear, at a narrator's 155 words a minute.
+  derive listenMins = max(1, round(preview.words / 155))
+  derive listenText = listenMins >= 60 ? `${floor(listenMins / 60)} h ${listenMins % 60} min` : `${listenMins} min`
   // What the wait is: a link is fetched by the server; a file is read on the phone (a PDF by the server).
   derive linkHost = match linkTaken.split("/").at(2) { case some(h) => h, case none => "" }
   derive readingText = linkTaken != "" ? `Downloading from ${linkHost}…` : fileName.toLowerCase().endsWith(".pdf") ? "Reading the PDF…" : "Reading the book…"
-  resource preview = previewImport(adding ? filePath : "", adding ? fileName : "", adding ? linkTaken : "") as shape ImportPreview else empty(ok=false, error="", title="", author="", cover="", chapters=[], token="")
+  resource preview = previewImport(adding ? filePath : "", adding ? fileName : "", adding ? linkTaken : "") as shape ImportPreview else empty(ok=false, error="", title="", author="", cover="", chapters=[], token="", words=0)
   // Z-Library and LibGen open over the app (Safari's view on iOS), and Done comes back.
   mutation browser as shape BrowserResult
 
@@ -1122,11 +1127,14 @@ component App
                       text preview.title role="heading" aria-level=3 font-family="Jost" font-weight=300 font-size="1.75rem" line-height=1.25 letter-spacing="-0.01em" color="light-dark(#14171f, #14171f)" text-align="center" testId="add-title"
                       if preview.author != ""
                         text preview.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="light-dark(#6b7080, #6b7080)" text-align="center" testId="add-author"
+                    // The book in numbers: how long it is to hear, its pages and its chapters.
+                    row gap=32 justify-content="center" padding-top=14 testId="add-stats"
+                      BookStat(value=listenText, label="Listening")
+                      BookStat(value=`${max(1, round(preview.words / 275))}`, label="Pages")
+                      BookStat(value=`${preview.chapters.length}`, label=(preview.chapters.length == 1 ? "Chapter" : "Chapters"))
                   column testId="add-chapters"
-                    text `${preview.chapters.length} ${preview.chapters.length == 1 ? "chapter" : "chapters"}` font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" padding-bottom=6
                     for c, i in preview.chapters key=i
-                      row gap=14 padding="9px 0" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))"
-                        text `${i + 1}` font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" width="1.75rem" font-variant-numeric="tabular-nums"
+                      row padding="11px 0" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))")
                         text c font-size="0.9375rem" color="light-dark(#14171f, #14171f)" flex=1 min-width=0 line-clamp=1
                   column gap=14 align-items="center" padding-bottom=120
                     if refusal != ""
@@ -1420,6 +1428,15 @@ component App
 style Chip
   appearance="none" display="flex" align-items="center" justify-content="center" gap=8 height=44 padding="0 18px" border-radius=999
   box-sizing="border-box" flex-shrink=0 cursor="pointer" -exact-press-scale=0.95 -exact-press-haptic="selection"
+component BookStat
+  props
+    value: string
+    label: string
+  view
+    column align-items="center" gap=4
+      text value font-size="1.0625rem" font-weight=600 color="light-dark(#14171f, #14171f)" font-variant-numeric="tabular-nums"
+      text label.toUpperCase() font-size="0.625rem" font-weight=600 letter-spacing="0.08em" color="light-dark(#8a8f9c, #8a8f9c)"
+
 // A chip on the composer's glass: an icon, a name and a chevron, a menu behind it.
 style Pill
   display="flex" align-items="center" gap=6 height=48 padding="0 10px" border-radius=999 min-width=0 cursor="pointer"

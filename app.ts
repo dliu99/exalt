@@ -38,6 +38,10 @@ type Reply = { ok: boolean; error: string };
 type Imported = Result<'importBook'>;
 // What a picked file or a pasted link is, before it is imported (previewImport).
 type ImportPreview = Result<'previewImport'>;
+// About how many words a book's chapters hold, from their length (an English word and its space
+// average about six characters): enough for a reading time and a page count, without a pass over
+// the text that the phone's interpreter would pay for.
+const wordsIn = (chapters: { text: string }[]) => Math.round(chapters.reduce((n, c) => n + c.text.length, 0) / 6);
 // A preview's cover goes inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
 const PREVIEW_COVER_BYTES = 700 * 1024;
 // The most storage.fs.readFile answers; a picked book past it is previewed by the server.
@@ -408,7 +412,7 @@ const sources: Sources = {
   // 16 MiB is read here, as the server reads it (server/book.ts); a PDF, a larger file or a link goes
   // to the server, which keeps what it read for Generate (`token`).
   previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
-    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '' });
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '', words: 0 });
     // Nothing picked or pasted yet: nothing to ask.
     if (!path && !link) return none('');
     try {
@@ -423,7 +427,7 @@ const sources: Sources = {
           const { chapters, meta } = await readBook(name, bytes, nextTurn);
           const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${await base64(meta.cover.bytes)}` : '';
           return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
-            chapters: chapters.map((c) => c.title), token: '' };
+            chapters: chapters.map((c) => c.title), token: '', words: wordsIn(chapters) };
         } catch (e) { return none(String((e as Error)?.message ?? e)); }
       }
       const query = new URLSearchParams(link ? { link } : { name });
@@ -435,10 +439,10 @@ const sources: Sources = {
         store.forget(SESSION);
         return none('Sign in again to import a book.');
       }
-      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string };
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string; words?: number };
       if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
       return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
-        chapters: (body.chapters ?? []).map(String), token: String(body.token ?? '') };
+        chapters: (body.chapters ?? []).map(String), token: String(body.token ?? ''), words: Number(body.words) || 0 };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
       return none(UNREACHABLE);
