@@ -304,6 +304,9 @@ component App
   derive linkOk = link.trim() == "" or link.trim().startsWith("https://")
   derive importHint = pending(imported) ? (link.trim() != "" ? "Downloading the book…" : "Uploading…") : not account.signedIn ? "Sign in to narrate." : fileName == "" and link.trim() == "" ? "Choose an EPUB, PDF or TXT file, or paste a link to one." : not linkOk ? "Paste a link that starts with https://." : chosenModel == "" ? "Choose a voice." : share and not rights ? "Confirm you have the right to share this book, or keep it private." : ""
   derive canImport = importHint == ""
+  // The composer's chips: the model's name and the voice's.
+  derive modelName = match first(models.filter(m => m.id == chosenModel)) { case some(m) => match m.name.split(" (").at(0) { case some(n) => n.replaceAll("Fish Audio ", ""), case none => m.name }, case none => "Model" }
+  derive voiceName = fishModel ? (voicePref.id == "" ? "Default" : voicePref.title) : (voice == "" ? "Default" : voice)
   derive adding = filePath != "" or linkTaken != ""
   resource preview = previewImport(adding ? filePath : "", adding ? fileName : "", adding ? linkTaken : "") as shape ImportPreview else empty(ok=false, error="", title="", author="", cover="", chapters=[])
   // Z-Library and LibGen open over the app (Safari's view on iOS), and Done comes back.
@@ -1072,13 +1075,13 @@ component App
                       image "symbol:document" color="light-dark(#14171f, #14171f)" width=34 height=34
                       text "EPUB, PDF or TXT" font-size="0.875rem" color="light-dark(#8a8f9c, #8a8f9c)"
                     input type="file" id="upload" display="none" change=picked testId="upload"
-                    row gap=18 justify-content="flex-start" padding-left=4
-                      button commandfor="link-sheet" command="show-modal" appearance="none" testId="add-paste" padding="4px 0" cursor="pointer"
-                        text "Paste link" font-size="0.9375rem" color="light-dark(#14171f, #14171f)"
-                      button press=openLibrary("https://z-library.sk") appearance="none" testId="open-zlibrary" padding="4px 0" cursor="pointer"
-                        text "Z-Library" font-size="0.9375rem" color="light-dark(#6b7080, #6b7080)"
-                      button press=openLibrary("https://libgen.li") appearance="none" testId="open-libgen" padding="4px 0" cursor="pointer"
-                        text "LibGen" font-size="0.9375rem" color="light-dark(#6b7080, #6b7080)"
+                    row gap=24 justify-content="flex-start" padding-left=4 padding-top=4
+                      button commandfor="link-sheet" command="show-modal" appearance="none" testId="add-paste" padding="10px 0" min-height=44 cursor="pointer"
+                        text "Paste link" font-size="1.0625rem" color="light-dark(#14171f, #14171f)"
+                      button press=openLibrary("https://z-library.sk") appearance="none" testId="open-zlibrary" padding="10px 0" min-height=44 cursor="pointer"
+                        text "Z-Library" font-size="1.0625rem" color="light-dark(#6b7080, #6b7080)"
+                      button press=openLibrary("https://libgen.li") appearance="none" testId="open-libgen" padding="10px 0" min-height=44 cursor="pointer"
+                        text "LibGen" font-size="1.0625rem" color="light-dark(#6b7080, #6b7080)"
                   // A link: a small sheet of its own, the field and Add.
                   dialog id="link-sheet" aria-label="Paste a link" testId="link-sheet" width="100%"
                     column gap=18 width="100%" max-width=440 margin="0 auto" box-sizing="border-box" padding="28px 24px calc(env(safe-area-inset-bottom) + 20px)"
@@ -1088,8 +1091,10 @@ component App
                         background-color="transparent" border="none" border-bottom="1px solid light-dark(rgba(20,23,31,0.25), rgba(20,23,31,0.25))" border-radius=0 padding="12px 0" outline="none"
                       if refusal != ""
                         text refusal font-size="0.875rem" color="-exact-system-red" testId="add-error"
-                      button press=takeLink buttonStyle="prominent-glass" testId="add-link-go" width="100%" disabled=(link.trim() == "")
-                        text "Add"
+                      button press=takeLink appearance="none" testId="add-link-go" disabled=(link.trim() == "")
+                        width="100%" height=54 border-radius=999 display="flex" align-items="center" justify-content="center" cursor="pointer"
+                        background-color="light-dark(#14171f, #14171f)" opacity=(link.trim() == "" ? 0.35 : 1) -exact-press-scale=0.97 -exact-press-haptic="impact-medium"
+                        text "Add" font-size="1.0625rem" font-weight=600 color="light-dark(#f4f2ec, #f4f2ec)"
                 else if pending(preview) or (preview.title == "" and preview.error == "")
                   column height=360 align-items="center" justify-content="center"
                     progress aria-label="Reading the book" testId="add-reading"
@@ -1112,31 +1117,62 @@ component App
                       row gap=14 padding="9px 0" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))"
                         text `${i + 1}` font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" width="1.75rem" font-variant-numeric="tabular-nums"
                         text c font-size="0.9375rem" color="light-dark(#14171f, #14171f)" flex=1 min-width=0 line-clamp=1
-                  column gap=10
-                    select value=chosenModel change=pickModel aria-label="Voice model" testId="model" width="100%" box-sizing="border-box" font-size="1rem" color="light-dark(#14171f, #14171f)" background-color="transparent" border="none" border-bottom="1px solid light-dark(rgba(20,23,31,0.2), rgba(20,23,31,0.2))" border-radius=0 padding="10px 0" outline="none"
-                      for m in models key=m.id
-                        option m.name value=m.id
-                    if fishModel
-                      select value=voicePref.id change=pickVoice aria-label="Voice" testId="import-voice" width="100%" box-sizing="border-box" font-size="1rem" color="light-dark(#14171f, #14171f)" background-color="transparent" border="none" border-bottom="1px solid light-dark(rgba(20,23,31,0.2), rgba(20,23,31,0.2))" border-radius=0 padding="10px 0" outline="none"
-                        option "Default voice" value=""
-                        if voicePref.id != "" and voiceList.filter(v => v.id == voicePref.id).length == 0
-                          option voicePref.title value=voicePref.id
-                        for v in voiceList key=v.id
-                          option v.title value=v.id
-                    else if voices.length > 0
-                      select value=voice change=editVoice aria-label="Voice" testId="voice" width="100%" box-sizing="border-box" font-size="1rem" color="light-dark(#14171f, #14171f)" background-color="transparent" border="none" border-bottom="1px solid light-dark(rgba(20,23,31,0.2), rgba(20,23,31,0.2))" border-radius=0 padding="10px 0" outline="none"
-                        option "Default voice" value=""
-                        for v in voices key=v
-                          option v value=v
-                  column gap=12 align-items="center"
-                    button press=narrate buttonStyle="prominent-glass" testId="narrate" disabled=(not canImport)
-                      text "Narrate"
-                    if pending(imported)
-                      progress aria-label="Starting"
+                  column gap=14 align-items="center" padding-bottom=120
                     if refusal != ""
-                      text refusal font-size="0.875rem" color="-exact-system-red" text-align="center" testId="import-hint"
-                    button press=resetAdd appearance="none" testId="add-again" padding="4px 0" cursor="pointer"
-                      text "Choose another" font-size="0.875rem" color="light-dark(#8a8f9c, #8a8f9c)"
+                      text refusal font-size="0.9375rem" color="-exact-system-red" text-align="center" testId="import-hint"
+                    button press=resetAdd appearance="none" testId="add-again" padding="10px 16px" cursor="pointer"
+                      text "Choose another" font-size="0.9375rem" color="light-dark(#6b7080, #6b7080)"
+            // Step two's composer, on one glass bar at the foot: the model and the voice, each a menu, and Generate.
+            if adding and preview.ok and not pending(preview)
+              row position="absolute" left=16 right=16 bottom="calc(env(safe-area-inset-bottom) + 12px)" max-width="32rem" margin="0 auto" box-sizing="border-box"
+                align-items="center" gap=4 padding=8 border-radius=999 backgroundMaterial="glass" class=Lift testId="composer"
+                button popovertarget="model-menu" appearance="none" aria-label=`Voice model: ${modelName}` testId="model" class=Pill flex-shrink=1
+                  image "symbol:sparkles" color="light-dark(#14171f, #14171f)" width=16 height=16 flex-shrink=0
+                  text modelName font-size="0.9375rem" font-weight=500 color="light-dark(#14171f, #14171f)" line-clamp=1 min-width=0
+                  image "symbol:sf/chevron.down" color="light-dark(#6b7080, #6b7080)" width=10 height=10 flex-shrink=0
+                column id="model-menu" popover="auto" role="menu" aria-label="Voice model"
+                  for m in models key=m.id
+                    button press=pickModel(m.id) popovertarget="model-menu" popovertargetaction="hide" testId=`model-${m.id}`
+                      if m.id == chosenModel
+                        image "symbol:checkmark"
+                      text m.name
+                if fishModel or voices.length > 0
+                  button popovertarget="voice-menu" appearance="none" aria-label=`Voice: ${voiceName}` testId="import-voice" class=Pill flex-shrink=1
+                    image "symbol:waveform" color="light-dark(#14171f, #14171f)" width=16 height=16 flex-shrink=0
+                    text voiceName font-size="0.9375rem" font-weight=500 color="light-dark(#14171f, #14171f)" line-clamp=1 min-width=0
+                    image "symbol:sf/chevron.down" color="light-dark(#6b7080, #6b7080)" width=10 height=10 flex-shrink=0
+                  column id="voice-menu" popover="auto" role="menu" aria-label="Voice"
+                    if fishModel
+                      button press=pickVoice("") popovertarget="voice-menu" popovertargetaction="hide" testId="voice-default"
+                        if voicePref.id == ""
+                          image "symbol:checkmark"
+                        text "Default voice"
+                      if voicePref.id != "" and voiceList.filter(v => v.id == voicePref.id).length == 0
+                        button press=pickVoice(voicePref.id) popovertarget="voice-menu" popovertargetaction="hide"
+                          image "symbol:checkmark"
+                          text voicePref.title
+                      for v in voiceList key=v.id
+                        button press=pickVoice(v.id) popovertarget="voice-menu" popovertargetaction="hide" testId=`voice-${v.id}`
+                          if v.id == voicePref.id
+                            image "symbol:checkmark"
+                          text v.title
+                    else
+                      button press=editVoice("") popovertarget="voice-menu" popovertargetaction="hide" testId="voice-default"
+                        if voice == ""
+                          image "symbol:checkmark"
+                        text "Default voice"
+                      for v in voices key=v
+                        button press=editVoice(v) popovertarget="voice-menu" popovertargetaction="hide"
+                          if v == voice
+                            image "symbol:checkmark"
+                          text v
+                button press=narrate appearance="none" testId="narrate" disabled=(not canImport) aria-label="Generate"
+                  height=48 padding="0 20px" flex-shrink=0 margin-left="auto" border-radius=999 display="flex" align-items="center" justify-content="center" gap=8
+                  background-color="light-dark(#14171f, #14171f)" opacity=(canImport ? 1 : 0.35) cursor="pointer" -exact-press-scale=0.95 -exact-press-haptic="impact-medium"
+                  if pending(imported)
+                    progress aria-label="Starting" color="light-dark(#f4f2ec, #f4f2ec)"
+                  else
+                    text "Generate" font-size="1rem" font-weight=600 color="light-dark(#f4f2ec, #f4f2ec)"
         // The player, in the dark: the cover lights the room, and the controls float on glass. What it
         // plays is App's (below), so leaving it keeps the chapter playing in the mini player.
         if e.name == "play"
@@ -1373,6 +1409,10 @@ component App
 style Chip
   appearance="none" display="flex" align-items="center" justify-content="center" gap=8 height=44 padding="0 18px" border-radius=999
   box-sizing="border-box" flex-shrink=0 cursor="pointer" -exact-press-scale=0.95 -exact-press-haptic="selection"
+// A chip on the composer's glass: an icon, a name and a chevron, a menu behind it.
+style Pill
+  display="flex" align-items="center" gap=6 height=48 padding="0 10px" border-radius=999 min-width=0 cursor="pointer"
+
 style Round
   appearance="none" display="flex" align-items="center" justify-content="center" width=44 height=44 padding=0 border-radius=999
   flex-shrink=0 cursor="pointer" -exact-press-scale=0.9 -exact-press-haptic="selection"
