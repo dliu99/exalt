@@ -32,7 +32,11 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
-type Reply = Result<'importBook'>;
+type Reply = { ok: boolean; error: string };
+// What an import answers: a Reply, and the new audiobook's id (`gen`; empty on failure), to open its player.
+type Imported = Reply & { gen: string };
+// What a picked file or a pasted link is, before it is imported (previewImport).
+type ImportPreview = { ok: boolean; error: string; title: string; author: string; cover: string; chapters: string[] };
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 
@@ -384,8 +388,34 @@ const sources: Sources = {
   },
   // An import: the picked file's bytes go up as the request body, or a pasted link (`link`) the
   // server downloads itself; what to make of them in the query.
-  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Reply> => {
-    if (!session(store)) return { ok: false, error: 'Sign in to import a book.' };
+  // What a picked file (`path`, named `name`) or a pasted `link` is, before it is imported: its
+  // title, author, cover (a data: URL, or "") and chapter titles. Nothing is kept.
+  previewImport: async ([path, name, link]: [string, string, string], store: Store, storage: Storage): Promise<ImportPreview> => {
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [] });
+    // Nothing picked or pasted yet: nothing to ask.
+    if (!path && !link) return none('');
+    try {
+      const bytes = link ? undefined : await storage.fs.readFile(path);
+      const query = new URLSearchParams(link ? { link } : { name });
+      const res = await fetch(`${API}/audiobooks/preview?${query}`, {
+        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+      });
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return none('Sign in again to import a book.');
+      }
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[] };
+      if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
+      return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
+        chapters: (body.chapters ?? []).map(String) };
+    } catch (e) {
+      if ((e as Kind).code === 'bake') throw e;
+      return none(UNREACHABLE);
+    }
+  },
+  // The answer carries the new audiobook's id (`gen`), to open its player.
+  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Imported> => {
+    if (!session(store)) return { ok: false, error: 'Sign in to import a book.', gen: '' };
     try {
       const bytes = link ? undefined : await storage.fs.readFile(path);
       const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0', ...(link ? { link } : {}) });
@@ -394,12 +424,14 @@ const sources: Sources = {
       });
       if (res.status === 401) {
         store.forget(SESSION);
-        return { ok: false, error: 'Sign in again to import a book.' };
+        return { ok: false, error: 'Sign in again to import a book.', gen: '' };
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
+      if (!res.ok) return { ok: false, error: await refusal(res), gen: '' };
+      const body = (await res.json().catch(() => ({}))) as { id?: unknown };
+      return { ok: true, error: '', gen: String(body.id ?? '') };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
-      return { ok: false, error: UNREACHABLE };
+      return { ok: false, error: UNREACHABLE, gen: '' };
     }
   },
   // Sharing on asks the person to confirm they have the right to share the book.
