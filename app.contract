@@ -1146,7 +1146,6 @@ component App
               row position="absolute" left=16 right=16 bottom="calc(env(safe-area-inset-bottom) + 12px)" max-width="32rem" margin="0 auto" box-sizing="border-box"
                 align-items="center" gap=4 padding=8 border-radius=999 backgroundMaterial="glass" class=Lift testId="composer"
                 button popovertarget="model-menu" appearance="none" aria-label=`Voice model: ${modelName}` testId="model" class=Pill flex-shrink=1
-                  image "symbol:sparkles" color="light-dark(#14171f, #14171f)" width=16 height=16 flex-shrink=0
                   text modelName font-size="0.9375rem" font-weight=500 color="light-dark(#14171f, #14171f)" line-clamp=1 min-width=0
                   image "symbol:sf/chevron.down" color="light-dark(#6b7080, #6b7080)" width=10 height=10 flex-shrink=0
                 column id="model-menu" popover="auto" role="menu" aria-label="Voice model"
