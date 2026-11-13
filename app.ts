@@ -2,6 +2,7 @@ import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.t
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
+import { bookMeta, readBook } from './server/book.ts';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -34,9 +35,17 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
 
 type Reply = { ok: boolean; error: string };
 // What an import answers: a Reply, and the new audiobook's id (`gen`; empty on failure), to open its player.
-type Imported = Reply & { gen: string };
+type Imported = Result<'importBook'>;
 // What a picked file or a pasted link is, before it is imported (previewImport).
-type ImportPreview = { ok: boolean; error: string; title: string; author: string; cover: string; chapters: string[] };
+type ImportPreview = Result<'previewImport'>;
+// A preview's cover goes inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
+const PREVIEW_COVER_BYTES = 700 * 1024;
+const COVER_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' } as const;
+const base64 = (bytes: Uint8Array) => {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 
@@ -382,42 +391,61 @@ const sources: Sources = {
       return { ok: false, error: UNREACHABLE };
     }
   },
-  // An import: the picked file's bytes go up as the request body, or a pasted link (`link`) the
-  // server downloads itself; what to make of them in the query.
   // What a picked file (`path`, named `name`) or a pasted `link` is, before it is imported: its
-  // title, author, cover (a data: URL, or "") and chapter titles. Nothing is kept.
-  previewImport: async ([path, name, link]: [string, string, string], store: Store, storage: Storage): Promise<ImportPreview> => {
-    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [] });
+  // title, author, cover (a data: URL, or "") and chapter titles. A picked EPUB or TXT is read here,
+  // as the server reads it (server/book.ts), in the time it takes to unzip; a PDF or a link goes to
+  // the server, which keeps what it read for Generate (`token`).
+  previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '' });
     // Nothing picked or pasted yet: nothing to ask.
     if (!path && !link) return none('');
     try {
-      const bytes = link ? undefined : await storage.fs.readFile(path);
+      if (!link && /\.(epub|txt)$/i.test(name)) {
+        const read = await storage.fs.readFile(path);
+        const bytes = read instanceof Uint8Array ? read : new Uint8Array(read);
+        try {
+          const chapters = readBook(name, bytes);
+          const meta = bookMeta(name, bytes);
+          const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${base64(meta.cover.bytes)}` : '';
+          return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
+            chapters: chapters.map((c) => c.title), token: '' };
+        } catch (e) { return none(String((e as Error)?.message ?? e)); }
+      }
       const query = new URLSearchParams(link ? { link } : { name });
       const res = await fetch(`${API}/audiobooks/preview?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        method: 'POST', exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        ...(link ? {} : { exactBodyFrom: path }),
       });
       if (res.status === 401) {
         store.forget(SESSION);
         return none('Sign in again to import a book.');
       }
-      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[] };
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string };
       if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
       return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
-        chapters: (body.chapters ?? []).map(String) };
+        chapters: (body.chapters ?? []).map(String), token: String(body.token ?? '') };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
       return none(UNREACHABLE);
     }
   },
-  // The answer carries the new audiobook's id (`gen`), to open its player.
-  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Imported> => {
+  // An import: the preview's kept file (`token`), else the picked file sent from disk (its bytes
+  // never enter JavaScript) or a pasted link the server downloads itself; what to make of it in the
+  // query. A token the server no longer has (410) is followed by the file or link itself. The answer
+  // carries the new audiobook's id (`gen`), to open its player.
+  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights, token], store, storage): Promise<Imported> => {
     if (!session(store)) return { ok: false, error: 'Sign in to import a book.', gen: '' };
     try {
-      const bytes = link ? undefined : await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0', ...(link ? { link } : {}) });
-      const res = await fetch(`${API}/audiobooks?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
-      });
+      const send = (kept: string) => {
+        const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0',
+          ...(kept ? { token: kept } : link ? { link } : {}) });
+        return fetch(`${API}/audiobooks?${query}`, {
+          method: 'POST', exactTimeout: link && !kept ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+          ...(kept || link ? {} : { exactBodyFrom: path }),
+        });
+      };
+      let res = await send(token);
+      if (token && res.status === 410) res = await send('');
       if (res.status === 401) {
         store.forget(SESSION);
         return { ok: false, error: 'Sign in again to import a book.', gen: '' };

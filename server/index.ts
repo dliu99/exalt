@@ -15,6 +15,7 @@ import { AUDIO_DIR, activeFor, MAX_ACTIVE, narrateAhead, OFFLINE_BOOK, prepared,
 import { checkedAddresses, fetchLink, LinkRefused, linkURL } from './link.ts';
 import { liveFile, liveOf } from './live.ts';
 import { bookMeta, parseBook } from './parse.ts';
+import { keep, type Kept, take } from './kept.ts';
 import { listModels } from './tts.ts';
 import { audioType, audioURL, coverPath, coverType, coverURL, saveCover, validateAudioFile, validateCoverFile } from './storage.ts';
 import { listVoices } from './fish.ts';
@@ -229,21 +230,27 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   // PREVIEW_COVER_BYTES) and its chapters' titles. Nothing is kept; a file that isn't a book
   // answers ok: false with why.
   '/audiobooks/preview': { OPTIONS: preflight, POST: async (req) => {
-    if (!userOf(req)) return send({ ok: false, error: 'Sign in to import a book.' }, 401);
+    const me = userOf(req);
+    if (!me) return send({ ok: false, error: 'Sign in to import a book.' }, 401);
     const q = new URL(req.url).searchParams;
     const link = (q.get('link') ?? '').trim();
     if (link) server.timeout(req, 180);
     if (uploading >= 2) return send({ ok: false, error: 'Uploads are busy. Try again shortly.' }, 429);
     uploading++;
     try {
-      const { name, bytes } = link ? await linkedFile(await checkedLink(link))
+      const url = link ? await checkedLink(link) : undefined;
+      const { name, bytes } = url ? await linkedFile(url)
         : { name: (q.get('name') ?? '').trim(), bytes: new Uint8Array(await req.arrayBuffer()) };
+      // A copy first: parsing a PDF may take its buffer.
+      const kept = { name, bytes: bytes.slice(), link: url?.href ?? '' };
       const chapters = await parseBook(name, bytes);
       const meta = bookMeta(name, bytes);
       const title = (meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled').slice(0, 200);
       const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES
         ? `data:${COVER_TYPES[meta.cover.ext]};base64,${Buffer.from(meta.cover.bytes).toString('base64')}` : '';
-      return send({ ok: true, error: '', title, author: meta.author.slice(0, 200), cover, chapters: chapters.map((c) => c.title) });
+      // What was read is kept for Generate (kept.ts): `token` takes it, with no second upload or download.
+      const token = keep(me.id, kept);
+      return send({ ok: true, error: '', title, author: meta.author.slice(0, 200), cover, chapters: chapters.map((c) => c.title), token });
     } catch (e) {
       return send({ ok: false, error: String((e as Error).message ?? e) }, 400);
     } finally { uploading--; }
@@ -254,13 +261,15 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   // the file's name unless the query names it. It is split into chapters and its first is
   // narrated; the rest wait to be asked for. Sharing it (`public`, on unless `public=0`) needs
   // the rights confirmed (`rights=1`). A link the person already imported with the same voice
-  // answers with that audiobook (200, `reused`).
+  // answers with that audiobook (200, `reused`). A preview's `token` stands for its file (kept.ts);
+  // one unknown or expired answers 410 (`expired`), and the app sends the file or link again.
   '/audiobooks': { OPTIONS: preflight, POST: async (req) => {
     const me = userOf(req);
     if (!me) return send({ error: 'Sign in to make an audiobook.' }, 401);
     const q = new URL(req.url).searchParams;
     let name = (q.get('name') ?? '').trim();
-    const link = (q.get('link') ?? '').trim();
+    const token = (q.get('token') ?? '').trim();
+    let link = (q.get('link') ?? '').trim();
     if (link) server.timeout(req, 180);
     const model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
     const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
@@ -268,10 +277,18 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     if (isPublic && q.get('rights') !== '1') return send({ error: RIGHTS }, 400);
     if (!model) return send({ error: 'Choose a voice model.' }, 400);
     if (model.length > 120 || voice.length > 200 || !(await listModels(OFFLINE)).some((m) => m.id === model)) return send({ error: 'Choose one of the available voice models.' }, 400);
+    // A preview's file, taken once every check above has passed.
+    let previewed: Kept | null = null;
+    if (token) {
+      previewed = take(me.id, token);
+      if (!previewed) return send({ error: 'That preview has expired. Send the book again.', expired: true }, 410);
+      ({ name, link } = previewed);
+    }
     // A link is checked before anything is reserved: its scheme, and that its host is public.
     // What is kept of it is its hash, which finds an audiobook already made from it.
     let url: URL | undefined;
-    if (link) {
+    if (link && previewed) url = new URL(link);
+    else if (link) {
       try { url = await checkedLink(link); } catch (e) { return fail(e, 400); }
     }
     const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : '';
@@ -286,7 +303,10 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
       uploading++;
       try {
         let bytes: Uint8Array;
-        if (url) {
+        if (previewed) {
+          bytes = previewed.bytes;
+          if (url) db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), id);
+        } else if (url) {
           // The offline server downloads nothing: its sample link is its sample book.
           ({ name, bytes } = await linkedFile(url));
           db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), id);

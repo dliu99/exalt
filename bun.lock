@@ -10,6 +10,7 @@
         "@exact/oauth": "file:../exact/packages/oauth",
         "@exact/passkeys": "file:../exact/packages/passkeys",
         "@exact/sign-in": "file:../exact/packages/sign-in",
+        "fflate": "^0.8.2",
       },
     },
   },
@@ -23,5 +24,7 @@
     "@exact/passkeys": ["@exact/passkeys@file:../exact/packages/passkeys", {}],
 
     "@exact/sign-in": ["@exact/sign-in@file:../exact/packages/sign-in", {}],
+
+    "fflate": ["fflate@0.8.3", "", {}, "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA=="],
   }
 }

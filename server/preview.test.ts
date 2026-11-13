@@ -46,11 +46,11 @@ function pdf() {
 }
 
 // An offline server on an empty database of its own; the persona token `ada` signs in.
-async function start() {
+async function start(env: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'exalt-preview-'));
   const child = Bun.spawn([process.execPath, 'server/index.ts', '--offline'], {
     cwd: join(import.meta.dir, '..'),
-    env: { ...process.env, HOST: '127.0.0.1', PORT: '0', DB: join(dir, 'db.sqlite'), AUDIO_DIR: join(dir, 'audio'), AUDIO_S3_BUCKET: '', AUDIO_SIGNING_KEY: '' },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: '0', DB: join(dir, 'db.sqlite'), AUDIO_DIR: join(dir, 'audio'), AUDIO_S3_BUCKET: '', AUDIO_SIGNING_KEY: '', ...env },
     stdout: 'pipe', stderr: 'pipe',
   });
   const reader = child.stdout.getReader();
@@ -75,7 +75,8 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
 
     // An EPUB: its metadata, its cover inline, its chapter titles in order.
     expect(await preview({ name: 'upload.epub' }, epub()).then((r) => r.json())).toEqual({ ok: true, error: '', title: 'The Lantern Keeper',
-      author: 'Mara Ellison', cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: ['Chapter One', 'Chapter Two'] });
+      author: 'Mara Ellison', cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: ['Chapter One', 'Chapter Two'],
+      token: expect.stringMatching(/^[\w-]{24}$/) });
 
     // A PDF: named by its file, no cover, its pages in parts.
     const fromPdf = await preview({ name: 'Notes on Tides.pdf' }, pdf()).then((r) => r.json());
@@ -84,7 +85,8 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
 
     // A link (the offline server's sample book).
     expect(await preview({ link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json())).toEqual({ ok: true, error: '',
-      title: 'A Quiet Harbour', author: '', cover: '', chapters: ['Chapter One: The Harbour', 'Chapter Two: The River', 'Chapter Three: The Sea'] });
+      title: 'A Quiet Harbour', author: '', cover: '', chapters: ['Chapter One: The Harbour', 'Chapter Two: The River', 'Chapter Three: The Sea'],
+      token: expect.any(String) });
 
     // Not a book, or a link refused: ok false, and why.
     const notBook = await preview({ name: 'notes.docx' }, strToU8('not a book'));
@@ -109,5 +111,49 @@ test('an import answers its audiobook’s id', async () => {
     expect(id).toMatch(/^\d+$/);
     const mine = await fetch(`${s.address}/me/audiobooks`, { headers: { authorization: 'Bearer ada' } }).then((r) => r.json());
     expect(mine.map((g: { id: string }) => g.id)).toEqual([id]);
+  } finally { await s.stop(); }
+});
+
+const IMPORT = { model: 'exalt/silence', public: '0' };
+
+test('a preview’s token makes the audiobook without the file again, once, for its reader alone', async () => {
+  const s = await start();
+  try {
+    const { token } = await s.post('/audiobooks/preview', { name: 'upload.epub' }, epub()).then((r) => r.json());
+    // Another person can't use it.
+    const other = await s.post('/audiobooks', { ...IMPORT, token }, undefined, 'bob');
+    expect(other.status).toBe(410);
+    expect(await other.json()).toMatchObject({ expired: true });
+    // Its reader can, with no body.
+    const made = await s.post('/audiobooks', { ...IMPORT, token });
+    expect(made.status).toBe(202);
+    const { id } = await made.json();
+    const g = await fetch(`${s.address}/generations/${id}`, { headers: { authorization: 'Bearer ada' } }).then((r) => r.json());
+    expect([g.title, g.author]).toEqual(['The Lantern Keeper', 'Mara Ellison']);
+    expect(g.chapters.map((c: { title: string }) => c.title)).toEqual(['Chapter One', 'Chapter Two']);
+    // Once.
+    expect((await s.post('/audiobooks', { ...IMPORT, token })).status).toBe(410);
+
+    // A link's token: the link isn't fetched again, and the same link with the same voice is found again.
+    const linked = await s.post('/audiobooks/preview', { link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json());
+    const fromLink = await s.post('/audiobooks', { ...IMPORT, token: linked.token }).then((r) => r.json());
+    expect(fromLink.ok).toBe(true);
+    const again = await s.post('/audiobooks', { ...IMPORT, link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json());
+    expect(again).toMatchObject({ ok: true, id: fromLink.id, reused: true });
+  } finally { await s.stop(); }
+});
+
+test('an unknown or expired token answers 410, and nothing is made', async () => {
+  const s = await start({ PREVIEW_KEEP_MS: '50' });
+  try {
+    const unknown = await s.post('/audiobooks', { ...IMPORT, token: 'no-such-token' });
+    expect(unknown.status).toBe(410);
+    expect(await unknown.json()).toEqual({ error: 'That preview has expired. Send the book again.', expired: true });
+    const { token } = await s.post('/audiobooks/preview', { name: 'upload.epub' }, epub()).then((r) => r.json());
+    await Bun.sleep(120);
+    expect((await s.post('/audiobooks', { ...IMPORT, token })).status).toBe(410);
+    expect(await fetch(`${s.address}/me/audiobooks`, { headers: { authorization: 'Bearer ada' } }).then((r) => r.json())).toEqual([]);
+    // The file sent again makes it.
+    expect((await s.post('/audiobooks', { ...IMPORT, name: 'upload.epub' }, epub())).status).toBe(202);
   } finally { await s.stop(); }
 });
