@@ -1127,11 +1127,8 @@ component App
                       text preview.title role="heading" aria-level=3 font-family="Jost" font-weight=300 font-size="1.75rem" line-height=1.25 letter-spacing="-0.01em" color="light-dark(#14171f, #14171f)" text-align="center" testId="add-title"
                       if preview.author != ""
                         text preview.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="light-dark(#6b7080, #6b7080)" text-align="center" testId="add-author"
-                    // The book in numbers: how long it is to hear, its pages and its chapters.
-                    row gap=32 justify-content="center" padding-top=14 testId="add-stats"
-                      BookStat(value=listenText, label="Listening")
-                      BookStat(value=`${max(1, round(preview.words / 275))}`, label="Pages")
-                      BookStat(value=`${preview.chapters.length}`, label=(preview.chapters.length == 1 ? "Chapter" : "Chapters"))
+                    // The book in numbers: about how long it is to hear, and its pages.
+                    text `${listenText}  ·  ${max(1, round(preview.words / 275))} pp.` padding-top=14 font-size="0.9375rem" font-weight=500 color="light-dark(#4a4f5c, #4a4f5c)" font-variant-numeric="tabular-nums" text-align="center" testId="add-stats"
                   column testId="add-chapters"
                     for c, i in preview.chapters key=i
                       row padding="11px 0" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))")
@@ -1427,15 +1424,6 @@ component App
 style Chip
   appearance="none" display="flex" align-items="center" justify-content="center" gap=8 height=44 padding="0 18px" border-radius=999
   box-sizing="border-box" flex-shrink=0 cursor="pointer" -exact-press-scale=0.95 -exact-press-haptic="selection"
-component BookStat
-  props
-    value: string
-    label: string
-  view
-    column align-items="center" gap=4
-      text value font-size="1.0625rem" font-weight=600 color="light-dark(#14171f, #14171f)" font-variant-numeric="tabular-nums"
-      text label.toUpperCase() font-size="0.625rem" font-weight=600 letter-spacing="0.08em" color="light-dark(#8a8f9c, #8a8f9c)"
-
 // A chip on the composer's glass: an icon, a name and a chevron, a menu behind it.
 style Pill
   display="flex" align-items="center" gap=6 height=48 padding="0 10px" border-radius=999 min-width=0 cursor="pointer"
