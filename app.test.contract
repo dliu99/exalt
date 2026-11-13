@@ -7,140 +7,152 @@ test "the lander shows one book at a time, and turns through the stack"
   tap "stack"
   expect text "great-title" == "Selected Writings"
 
-test "a book on the lander opens the app"
+test "a book on the lander opens Browse narrowed to its title"
   clock data
   tap "stack"
   tap "seek"
   clock data
-  expect tree has "home"
+  clock settle
+  expect tree has "browse"
+  expect state browseQuery == "Meditations"
+  expect state browseAsked == "Meditations"
+  expect text "browse-search" == "Meditations"
+  expect tree has "browse-empty"
 
-test "below the fold, the lander says what Exalt is and opens the library"
+test "below the fold, the lander says what Exalt is and opens Browse"
   clock data
-  expect tree has "about"
-  expect tree missing "lander-apple"
+  expect text "about" == "Import a book you own, and Exalt reads it aloud in a voice you choose."
   expect tree has "lander-google"
-  tap "lander-library"
+  tap "lander-browse"
   clock data
-  expect tree has "home"
-  expect tree has "no-places"
-  expect tree has "home-add"
-
-test "an empty library is a + to add a book"
-  at "/home"
-  clock data
-  expect tree has "app"
-  expect tree missing "book-OL1W"
-  expect tree has "home-add"
-
-test "+ opens Add a Book: a box to upload into, Paste link, Z-Library and LibGen; nothing else until a book is chosen"
-  at "/import"
-  clock data
-  expect tree has "add"
-  expect tree has "add-upload-box"
-  expect tree has "add-paste"
-  expect tree has "open-zlibrary"
-  expect tree has "open-libgen"
-  expect tree missing "model"
-  expect tree missing "create-save"
   clock settle
-  tap "add-paste"
-  expect tree has "add-link"
-  type "add-link" "http://books.example/a.txt"
-  type "add-link" key "Enter"
-  expect text "add-error" == "Paste a link that starts with https://."
-  expect state linkTaken == ""
+  expect tree has "browse"
 
-test "a book's page says what it is"
-  at "/book/OL2W"
+test "an empty library says to import a book"
   clock data
-  expect text "book-title" == "Notes on Rivers"
-  expect tree has "no-versions"
-  expect tree has "goodreads"
-  expect tree missing "book-description"
+  tap "enter"
+  clock data
+  clock settle
+  expect text "home-title" == "Library"
+  expect tree has "library-empty"
+  expect tree has "library-import"
+  expect tree has "library-google"
+  expect tree has "import"
+  expect tree missing "account-button"
 
-test "Import is the form for anyone: the book's searches, its file, a voice and consent"
-  at "/book/OL1W/import"
+test "the import sheet shares by default and waits for a file and the right to share"
   clock data
-  expect tree has "create"
-  expect tree has "find-libgen"
-  expect tree has "find-zlibrary"
-  expect tree has "find-web"
-  expect tree has "choose-file"
-  expect tree has "model"
-  expect tree has "rights"
-  expect tree missing "account"
+  tap "enter"
+  clock data
+  tap "library-import"
+  clock data
+  clock settle
+  expect tree has "import-sheet"
+  expect state model == ""
+  expect state chosenModel == "exalt/silence"
+  expect state share == true
   expect state rights == false
-  expect state canCreate == false
-  expect disabled "create-save"
-  tap "create-cancel"
-  clock data
-  expect text "book-title" == "A Quiet Harbour"
-
-test "Import takes a pasted link: an https link to a book file, which sets a download aside"
-  at "/book/OL1W/import"
-  clock data
-  expect tree has "link"
-  expect tree missing "link-note"
-  type "book-source" "lg-00000000000000000000000000000001"
-  expect tree has "source-note"
-  type "link" "http://books.example/a-quiet-harbour.txt"
-  expect state sourceId == ""
-  expect tree missing "source-note"
-  type "model" "exalt/silence"
+  expect disabled "narrate"
+  expect text "file-name" == "Choose…"
+  expect text "share-note" == "Anyone can listen in Browse. Only share books you have the right to."
+  expect text "import-hint" == "Sign in to narrate."
+  expect tree has "rights"
   tap "rights"
-  expect state canCreate == false
-  expect text "create-hint" == "Paste a link that starts with https://."
-  type "link" "https://books.example/a-quiet-harbour.txt"
-  expect tree has "link-note"
-  expect state canCreate == true
-  expect enabled "create-save"
-  // Signed out, Make asks for an account first, and carries on with the link.
-  tap "create-save"
-  expect tree has "account-site-google"
-  expect state pendingAuth == "make"
-  expect state link == "https://books.example/a-quiet-harbour.txt"
-
-test "signed out, Generate opens the sheet to log in or sign up, and stays on the book"
-  size 390x844
-  at "/book/OL1W"
-  clock data
-  expect state pendingAuth == ""
-  tap "make"
-  expect tree has "account-site-google"
-  expect state pendingAuth == "import"
-  expect tree missing "create"
-  expect text "book-title" == "A Quiet Harbour"
-
-test "closing the sheet without signing in carries nothing on"
-  size 390x844
-  at "/book/OL1W"
-  clock data
-  tap "make"
-  expect state pendingAuth == "import"
-  back
+  expect state rights == true
+  expect disabled "narrate"
+  tap "import-cancel"
   clock settle
-  expect state pendingAuth == ""
-  expect text "book-title" == "A Quiet Harbour"
+  expect tree has "library-empty"
 
-test "a book with no audiobook offers Generate, and back returns home"
-  size 390x844
-  at "/book/OL2W"
+test "keeping a book private asks for no right to share"
   clock data
-  expect tree has "make"
-  expect tree missing "listen"
-  back
+  tap "enter"
+  clock data
+  tap "import"
+  clock data
   clock settle
+  tap "share"
+  expect state share == false
+  expect tree missing "rights"
+  expect text "share-note" == "Only you can listen. You can share it later from your library."
+  tap "share"
+  expect state share == true
+  expect tree has "rights"
+  expect state rights == false
+
+test "signed out, the import sheet offers the way in"
+  clock data
+  tap "enter"
+  clock data
+  tap "import"
+  clock data
+  clock settle
+  expect tree has "import-signed-out"
+  expect tree has "import-google"
+
+test "browse says when nothing is shared, and when nothing matches"
+  clock data
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  clock settle
+  expect text "browse-title" == "Browse"
+  expect tree has "browse-empty"
+  type "browse-search" "harbour"
+  clock +400
+  clock data
+  expect state browseAsked == "harbour"
+  expect tree has "browse-empty"
+
+test "voices lists Fish Audio's, and choosing one makes it yours"
+  clock data
+  tap "enter"
+  clock data
+  tap "nav-voices"
+  clock data
+  expect tree has "voice-v-reader"
+  expect text "use-v-reader" == "Use"
+  expect tree missing "voices-back"
+  tap "use-v-reader"
+  clock data
+  expect text "use-v-reader" == "✓ Selected"
+  tap "nav-home"
+  clock data
   expect tree has "home"
 
-test "a version lists its chapters: the first narrated, the others waiting for Generate"
-  at "/book/OL1W"
-  request POST "/books/OL1W/generations?source=lg-00000000000000000000000000000001&model=exalt%2Fsilence&rights=1" as ada
+test "the import sheet takes a pasted link instead of a file"
+  clock data
+  tap "enter"
+  clock data
+  tap "import"
+  clock data
+  clock settle
+  expect tree has "link"
+  expect text "book-note" == "An EPUB, PDF or TXT of your own: choose the file, or paste a link to it."
+  type "link" "http://books.example/a-quiet-harbour.txt"
+  expect state linkOk == false
+  type "link" "https://books.example/a-quiet-harbour.txt"
+  expect state linkOk == true
+  expect state link == "https://books.example/a-quiet-harbour.txt"
+  expect text "book-note" == "Exalt downloads the file at this link (HTTPS, under 50 MB) and splits it into chapters."
+  expect text "file-name" == "Choose…"
+  expect text "import-hint" == "Sign in to narrate."
+  expect disabled "narrate"
+
+// From here on the run's shared database has ada's shared import of the offline server's sample
+// link (three chapters, the first narrated at import): audiobook 1. Importing it again is hers.
+test "a shared audiobook lists its chapters: the first narrated, the others waiting for Generate"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
   clock +1500 real
-  reload
+  clock data
+  tap "enter"
+  clock data
+  tap "nav-browse"
   clock +100
   clock data
-  expect text "status-1" == "ada · 1 of 3 chapters narrated"
-  tap "version-1"
+  expect tree has "shared-1"
+  tap "shared-1"
   clock data
   expect text "now-playing" == "Chapter One: The Harbour"
   expect tree has "toggle"
@@ -150,21 +162,29 @@ test "a version lists its chapters: the first narrated, the others waiting for G
   expect tree missing "delete"
   expect tree missing "in-progress"
 
-test "signed out, a chapter's Generate opens the sheet"
-  at "/book/OL1W"
+test "signed out, a chapter's Generate opens the sheet, and closing it carries nothing on"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   expect state pendingAuth == ""
   tap "generate-2"
-  expect tree has "account-site-google"
+  expect tree has "account-sheet"
   expect state pendingAuth == "chapter"
   expect state pendingChapter == 2
+  back
+  clock settle
+  expect state pendingAuth == ""
+  expect tree has "player"
 
 test "the player's speed, pause, position and skips"
-  at "/book/OL1W"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   expect state duration == 1
   expect state rate == 1
@@ -190,9 +210,11 @@ test "the player's speed, pause, position and skips"
   expect state now == 0
 
 test "at a chapter that isn't narrated the player stops and offers Generate, and plays it once someone has"
-  at "/book/OL1W"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   tap "audio" mediasession "nexttrack"
   expect text "now-playing" == "Chapter Two: The River"
@@ -209,33 +231,24 @@ test "at a chapter that isn't narrated the player stops and offers Generate, and
   expect tree has "toggle"
   expect tree missing "generate-1"
 
-test "once a chapter is narrated the dock plays the book"
-  size 390x844
-  at "/book/OL1W"
-  clock data
-  expect tree has "listen"
-  expect tree missing "make"
-  expect tree has "make-another"
-  tap "listen"
-  clock data
-  expect tree has "player"
-  expect text "now-playing" == "Chapter One: The Harbour"
-
 // The player is at App level: leaving it keeps the chapter playing, in the dock's mini player.
 // (The test chapters are a second of silence each, played in real time: what's checked after
 // the first steps is checked paused.)
 test "leaving the player keeps it playing, in the dock's mini player, which pauses and opens it"
   size 390x844
-  at "/book/OL1W"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   tap "player-back"
   clock settle
-  expect tree has "book"
+  expect tree has "browse"
   expect state held == false
   expect tree has "audio"
   expect tree has "mini-player"
+  expect tree has "nav-home"
   tap "mini-toggle"
   expect state held == true
   expect tree has "audio"
@@ -247,10 +260,12 @@ test "leaving the player keeps it playing, in the dock's mini player, which paus
   expect mediasession has "seekbackward"
   expect mediasession has "seekforward"
   expect mediasession has "nexttrack"
-  back
+  tap "nav-home"
+  clock data
   clock settle
   expect tree has "home"
   expect tree has "mini-player"
+  expect tree missing "mini"
   tap "mini-open"
   clock settle
   expect tree has "player"
@@ -259,13 +274,11 @@ test "leaving the player keeps it playing, in the dock's mini player, which paus
   expect tree has "toggle"
 
 test "a narrated chapter in the list plays at a tap; one that isn't keeps its Generate"
-  at "/book/OL1W"
-  request POST "/generations/1/chapters/1" as grace
-  clock +1500 real
-  reload
-  clock +100
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   expect text "now-playing" == "Chapter One: The Harbour"
   tap "track-1"
@@ -280,9 +293,11 @@ test "a narrated chapter in the list plays at a tap; one that isn't keeps its Ge
   expect tree missing "generate-1"
 
 test "the sleep timer counts while playing, holds with a pause, and pauses at its time or the chapter's end"
-  at "/book/OL1W"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   tap "toggle"
   expect state held == true
@@ -315,10 +330,12 @@ test "the sleep timer counts while playing, holds with a pause, and pauses at it
   expect tree missing "sleep-left"
 
 // It narrates the third chapter, which the tests above keep waiting for Generate: after them.
-test "a version downloads to the device, plays from there, and is removed again"
-  at "/book/OL1W"
+test "an audiobook downloads to the device, plays from there, and is removed again"
+  tap "enter"
   clock data
-  tap "version-1"
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
   clock data
   expect text "download-state" == "Listen offline"
   expect tree missing "remove-download"
@@ -340,7 +357,7 @@ test "a version downloads to the device, plays from there, and is removed again"
   // A chapter narrated since is offered as the rest.
   request POST "/generations/1/chapters/2" as grace
   clock +1500 real
-  // Reopened at the player's address, it loads the version there, paused.
+  // Reopened at the player's address, it loads the audiobook there, paused.
   reload
   clock +100
   clock data
@@ -356,15 +373,18 @@ test "a version downloads to the device, plays from there, and is removed again"
   expect tree missing "chapter-kept-0"
   expect state keptSrc == ""
 
-// Last: it adds a version to the run’s shared database.
-test "a book imported by link is split into chapters; a link to a private address is refused"
-  at "/book/OL2W"
-  request POST "/books/OL2W/generations?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2F127.0.0.1%2Fbook.epub" as ada expect 400
-  request POST "/books/OL2W/generations?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as ada
+// Last: it adds an audiobook to the run's shared database.
+test "a book imported by link is split into chapters and shared; a link to a private address is refused"
+  request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2F127.0.0.1%2Fbook.epub" as ada expect 400
+  request POST "/audiobooks?model=exalt%2Fsilence&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace expect 400
+  request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace
   clock +1500 real
-  reload
+  tap "enter"
+  clock data
+  tap "nav-browse"
   clock +100
   clock data
-  // The tests before it made version 1, of the other book; nothing was made of the refused link.
-  expect text "status-2" == "ada · 1 of 3 chapters narrated"
-  expect tree missing "status-3"
+  // ada's audiobook 1, and grace's own of the same link; nothing was made of the refused ones.
+  expect tree has "shared-1"
+  expect tree has "shared-2"
+  expect tree missing "shared-3"

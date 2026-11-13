@@ -50,7 +50,7 @@ const place = (token: string, gen: string, track: number, finished = false) => f
 
 test('reaching a chapter asks for the next one, within the listener’s three, and skips at the limit', async () => {
   const token = await signIn();
-  const made = await fetch(`${address}/books/OL1W/generations?source=lg-00000000000000000000000000000001&model=exalt%2Fsilence&rights=1`, { method: 'POST', headers: auth(token) });
+  const made = await fetch(`${address}/audiobooks?link=${encodeURIComponent('https://books.example/a-quiet-harbour.txt')}&model=exalt%2Fsilence&rights=1`, { method: 'POST', headers: auth(token) });
   expect(made.status).toBe(202);
   const { id } = await made.json() as { id: string };
   let g = await settled(token, id);
@@ -93,7 +93,7 @@ test('a chapter that failed is left for its Retry, not narrated ahead', async ()
   const token = await signIn();
   const book = ['Chapter 1: Morning', 'Chapter 2: Noon', 'Chapter 3: Night']
     .map((h) => `${h}\n${'The light moves slowly over the water and the town wakes, turns, and settles again by evening. '.repeat(3)}`).join('\n');
-  const made = await fetch(`${address}/books/OL2W/generations?model=exalt%2Fsilence&rights=1&name=days.txt`, { method: 'POST', headers: auth(token), body: book });
+  const made = await fetch(`${address}/audiobooks?model=exalt%2Fsilence&rights=1&name=days.txt`, { method: 'POST', headers: auth(token), body: book });
   const { id } = await made.json() as { id: string };
   await settled(token, id);
   const db = new Database(join(dir, 'db.sqlite'));

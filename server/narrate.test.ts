@@ -65,7 +65,7 @@ test('a chapter plays from its first part while the rest are narrated, at the ad
   const p = provider();
   const s = await start(p.server.port);
   try {
-    const made = await s.call('POST', `/books/OL2W/generations?model=${encodeURIComponent('heygen/test')}&rights=1&name=lantern.txt`, book);
+    const made = await s.call('POST', `/audiobooks?model=${encodeURIComponent('heygen/test')}&rights=1&name=lantern.txt`, book);
     expect(made.status).toBe(202);
     const { id } = await made.json() as { id: string };
     const gen = () => s.call('GET', `/generations/${id}`).then((r) => r.json() as Promise<{ status: string; active: number; chapters: Chapter[] }>);
@@ -127,7 +127,7 @@ test('a provider that answers 429 is waited for (retry-after) and then asked one
   const s = await start(p.server.port);
   try {
     p.limited = 1;
-    const made = await s.call('POST', `/books/OL2W/generations?model=${encodeURIComponent('heygen/test')}&rights=1&name=lantern.txt`, book);
+    const made = await s.call('POST', `/audiobooks?model=${encodeURIComponent('heygen/test')}&rights=1&name=lantern.txt`, book);
     const { id } = await made.json() as { id: string };
     await until('the first chapter', async () => { const g = await s.call('GET', `/generations/${id}`).then((r) => r.json()); return g.status === 'ready' && g.active === 0; });
     // The 429's retry-after (a second) passed before the provider was asked again.
@@ -139,5 +139,37 @@ test('a provider that answers 429 is waited for (retry-after) and then asked one
     expect(p.inFlight).toBe(1);
     while ((await s.call('GET', `/generations/${id}`).then((r) => r.json())).chapters[1].status !== 'ready') { p.release(); await Bun.sleep(15); }
     expect(p.most).toBe(1);
+  } finally { p.server.stop(true); await s.stop(); }
+}, 30000);
+
+test("a private audiobook's chapter plays live only on a signed address, and a deleted one's id is never given again", async () => {
+  const p = provider();
+  const s = await start(p.server.port);
+  try {
+    const made = await s.call('POST', `/audiobooks?model=${encodeURIComponent('heygen/test')}&public=0&name=lantern.txt`, book);
+    expect(made.status).toBe(202);
+    const { id } = await made.json() as { id: string };
+    const gen = () => s.call('GET', `/generations/${id}`).then((r) => r.json() as Promise<{ status: string; active: number; chapters: Chapter[] }>);
+    await until('the first chapter', async () => { const g = await gen(); return g.status === 'ready' && g.active === 0; });
+
+    p.held = true;
+    expect((await s.call('POST', `/generations/${id}/chapters/1`)).status).toBe(202);
+    await until('two parts asked for', async () => p.inFlight === 2);
+    p.release();
+    const live = await until('the first part to play', async () => { const c = (await gen()).chapters[1]; return c.status === 'working' && c.src ? c : undefined; });
+    expect(live.src).toMatch(/\?exp=\d+&sig=/);
+    const signed = await fetch(`${s.address}${live.src}`);
+    expect(signed.status).toBe(200);
+    expect(signed.headers.get('content-type')).toBe('audio/aac');
+    await signed.body?.cancel();
+    expect((await fetch(`${s.address}${live.src.split('?')[0]}`)).status).toBe(404);
+
+    // Deleted mid-chapter, its id is not reused by the next import.
+    expect((await s.call('DELETE', `/me/audiobooks/${id}`)).status).toBeLessThan(300);
+    p.held = false; p.release(10);
+    const again = await s.call('POST', `/audiobooks?model=${encodeURIComponent('heygen/test')}&public=0&name=lantern.txt`, book);
+    expect(again.status).toBe(202);
+    const next = (await again.json() as { id: string }).id;
+    expect(Number(next)).toBeGreaterThan(Number(id));
   } finally { p.server.stop(true); await s.stop(); }
 }, 30000);

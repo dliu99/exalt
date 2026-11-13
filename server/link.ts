@@ -1,5 +1,5 @@
 // Importing a book by link: someone pastes the address of an EPUB, PDF or TXT and the server
-// downloads it, with the LibGen downloads' safeguards (libgen.ts): HTTPS only, a 50 MiB cap,
+// downloads it, with safeguards: HTTPS only, a 50 MiB cap,
 // timeouts, and a check that the bytes are a book file. It must not become a way to reach the
 // server's own network, so every hop's host is resolved first and refused unless all of its
 // addresses are public (no private, loopback, link-local, shared or reserved ones). The

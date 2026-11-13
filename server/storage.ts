@@ -1,6 +1,8 @@
-// Database rows contain object keys, never audio blobs or expiring playback URLs.
+// Database rows contain object keys, never audio blobs or expiring playback URLs. Chapter audio
+// is `audio/<generation>/<chapter>.<ext>`, covers `covers/<book>.<ext>`, on disk under AUDIO_DIR
+// or as keys in the bucket.
 import { S3Client } from 'bun';
-import { mkdirSync, renameSync, rmSync, statfsSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export const AUDIO_DIR = process.env.AUDIO_DIR ?? join(dirname(process.env.DB ?? 'data.db'), 'audio');
@@ -38,7 +40,7 @@ export async function saveAudio(file: string, path: string): Promise<'s3' | 'loc
   renameSync(path, join(AUDIO_DIR, file));
   return 'local';
 }
-// Removes a stored chapter (a deleted version's); one already gone is fine.
+// Removes a stored chapter (a deleted audiobook's); one already gone is fine.
 export async function deleteAudio(file: string, storage: string) {
   validateAudioFile(file);
   if (storage === 's3') { if (s3) await s3.file(key(file)).delete().catch(() => {}); return; }
@@ -48,4 +50,26 @@ export function audioURL(file: string): string {
   validateAudioFile(file);
   if (!s3) throw new Error('The audio bucket is not configured on this server.');
   return s3.presign(key(file), { expiresIn: 3600 });
+}
+
+export const audioDir = (generationId: number) => join(AUDIO_DIR, String(generationId));
+
+// Covers: what an import's EPUB carried, kept as its book's. Only these names are served.
+const COVER_TYPES: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+export function validateCoverFile(file: string) {
+  if (!/^up-[0-9a-f]{16}\.(jpg|jpeg|png|webp|gif)$/.test(file)) throw new Error('Invalid cover key.');
+  return file;
+}
+export const coverType = (file: string) => COVER_TYPES[validateCoverFile(file).split('.').pop()!];
+export const coverPath = (file: string) => join(AUDIO_DIR, 'covers', validateCoverFile(file));
+export async function saveCover(file: string, bytes: Uint8Array) {
+  if (s3) { await s3.file(`covers/${validateCoverFile(file)}`).write(bytes, { type: coverType(file) }); return; }
+  mkdirSync(join(AUDIO_DIR, 'covers'), { recursive: true });
+  writeFileSync(coverPath(file), bytes);
+}
+// Where a bucket's cover is fetched from, or null when covers are kept on disk.
+export const coverURL = (file: string) => (s3 ? s3.presign(`covers/${validateCoverFile(file)}`, { expiresIn: 3600 }) : null);
+export async function removeCover(file: string) {
+  rmSync(coverPath(file), { force: true });
+  if (s3) await s3.file(`covers/${file}`).delete().catch(() => {});
 }

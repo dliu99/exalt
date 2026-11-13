@@ -40,10 +40,6 @@
       "bun",
       "server/index.ts",
       "--offline"
-    ],
-    "compare": [
-      "bun",
-      "server/compare.ts"
     ]
   },
   "audio_session": "playback"
