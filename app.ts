@@ -2,6 +2,7 @@ import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.t
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
+import { readBook } from './server/book.ts';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -32,7 +33,35 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
-type Reply = Result<'importBook'>;
+type Reply = { ok: boolean; error: string };
+// What an import answers: a Reply, and the new audiobook's id (`gen`; empty on failure), to open its player.
+type Imported = Result<'importBook'>;
+// What a picked file or a pasted link is, before it is imported (previewImport).
+type ImportPreview = Result<'previewImport'>;
+// About how many words a book's chapters hold, from their length (an English word and its space
+// average about six characters): enough for a reading time and a page count, without a pass over
+// the text that the phone's interpreter would pay for.
+const wordsIn = (chapters: { text: string }[]) => Math.round(chapters.reduce((n, c) => n + c.text.length, 0) / 6);
+// A preview's cover goes inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
+const PREVIEW_COVER_BYTES = 700 * 1024;
+// The most storage.fs.readFile answers; a picked book past it is previewed by the server.
+const LOCAL_READ_BYTES = 16 * 1024 * 1024;
+const COVER_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' } as const;
+// A turn of the data module has a budget (100 ms on an interpreter): the long reads below end theirs
+// as they go, and go on in a new one.
+const nextTurn = () => scheduler.yield();
+// Base64 a few slices a turn: each slice a multiple of three bytes, so the pieces join as one.
+async function base64(bytes: Uint8Array): Promise<string> {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3 * 8192) {
+    const slice = bytes.subarray(i, i + 3 * 8192);
+    let bin = '';
+    for (let j = 0; j < slice.length; j += 0x2000) bin += String.fromCharCode(...slice.subarray(j, j + 0x2000));
+    out += btoa(bin);
+    if (i % (3 * 8192 * 4) === 0) await nextTurn();
+  }
+  return out;
+}
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 
@@ -346,10 +375,6 @@ const sources: Sources = {
       public: g.public === true, voice: str(g.voice),
     }));
   },
-  // Everyone's shared, finished audiobooks, newest first; `q` narrows to a title or author.
-  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
-    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
-  })),
   // One audiobook to play: a shared one, or the person's own private one (hence the session), its
   // chapters, and how many chapters this listener has narrating (of how many at once). Out of
   // reach, a downloaded one answers with the copy kept beside its chapters.
@@ -382,24 +407,74 @@ const sources: Sources = {
       return { ok: false, error: UNREACHABLE };
     }
   },
-  // An import: the picked file's bytes go up as the request body, or a pasted link (`link`) the
-  // server downloads itself; what to make of them in the query.
-  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Reply> => {
-    if (!session(store)) return { ok: false, error: 'Sign in to import a book.' };
+  // What a picked file (`path`, named `name`) or a pasted `link` is, before it is imported: its
+  // title, author, cover (a data: URL, or "") and chapter titles. A picked EPUB or TXT of up to
+  // 16 MiB is read here, as the server reads it (server/book.ts); a PDF, a larger file or a link goes
+  // to the server, which keeps what it read for Generate (`token`).
+  previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '', words: 0 });
+    // Nothing picked or pasted yet: nothing to ask.
+    if (!path && !link) return none('');
     try {
-      const bytes = link ? undefined : await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0', ...(link ? { link } : {}) });
-      const res = await fetch(`${API}/audiobooks?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+      // readFile answers at most 16 MiB: a larger book goes to the server, from disk (below).
+      const size = !link && /\.(epub|txt)$/i.test(name) ? await storage.fs.stat(path).then((st) => st.size, () => -1) : -1;
+      if (size >= 0 && size <= LOCAL_READ_BYTES) {
+        const read = await storage.fs.readFile(path);
+        const bytes = read instanceof Uint8Array ? read : new Uint8Array(read);
+        try {
+          // The zip's directory read here, the entries the book needs inflated natively, a turn ended
+          // between files and chapters (server/book.ts).
+          const { chapters, meta } = await readBook(name, bytes, nextTurn);
+          const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${await base64(meta.cover.bytes)}` : '';
+          return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
+            chapters: chapters.map((c) => c.title), token: '', words: wordsIn(chapters) };
+        } catch (e) { return none(String((e as Error)?.message ?? e)); }
+      }
+      const query = new URLSearchParams(link ? { link } : { name });
+      const res = await fetch(`${API}/audiobooks/preview?${query}`, {
+        method: 'POST', exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        ...(link ? {} : { exactBodyFrom: path }),
       });
       if (res.status === 401) {
         store.forget(SESSION);
-        return { ok: false, error: 'Sign in again to import a book.' };
+        return none('Sign in again to import a book.');
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string; words?: number };
+      if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
+      return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
+        chapters: (body.chapters ?? []).map(String), token: String(body.token ?? ''), words: Number(body.words) || 0 };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
-      return { ok: false, error: UNREACHABLE };
+      return none(UNREACHABLE);
+    }
+  },
+  // An import: the preview's kept file (`token`), else the picked file sent from disk (its bytes
+  // never enter JavaScript) or a pasted link the server downloads itself; what to make of it in the
+  // query. A token the server no longer has (410) is followed by the file or link itself. The answer
+  // carries the new audiobook's id (`gen`), to open its player.
+  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights, token], store, storage): Promise<Imported> => {
+    if (!session(store)) return { ok: false, error: 'Sign in to import a book.', gen: '' };
+    try {
+      const send = (kept: string) => {
+        const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0',
+          ...(kept ? { token: kept } : link ? { link } : {}) });
+        return fetch(`${API}/audiobooks?${query}`, {
+          method: 'POST', exactTimeout: link && !kept ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+          ...(kept || link ? {} : { exactBodyFrom: path }),
+        });
+      };
+      let res = await send(token);
+      if (token && res.status === 410) res = await send('');
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return { ok: false, error: 'Sign in again to import a book.', gen: '' };
+      }
+      if (!res.ok) return { ok: false, error: await refusal(res), gen: '' };
+      const body = (await res.json().catch(() => ({}))) as { id?: unknown };
+      return { ok: true, error: '', gen: String(body.id ?? '') };
+    } catch (e) {
+      if ((e as Kind).code === 'bake') throw e;
+      return { ok: false, error: UNREACHABLE, gen: '' };
     }
   },
   // Sharing on asks the person to confirm they have the right to share the book.

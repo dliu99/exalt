@@ -5,14 +5,18 @@
     "": {
       "name": "exalt-app",
       "dependencies": {
+        "@exact/in-app-browser": "file:../exact/packages/in-app-browser",
         "@exact/notifications": "file:../exact/packages/notifications",
         "@exact/oauth": "file:../exact/packages/oauth",
         "@exact/passkeys": "file:../exact/packages/passkeys",
         "@exact/sign-in": "file:../exact/packages/sign-in",
+        "fflate": "^0.8.2",
       },
     },
   },
   "packages": {
+    "@exact/in-app-browser": ["@exact/in-app-browser@file:../exact/packages/in-app-browser", {}],
+
     "@exact/notifications": ["@exact/notifications@file:../exact/packages/notifications", {}],
 
     "@exact/oauth": ["@exact/oauth@file:../exact/packages/oauth", {}],
@@ -20,5 +24,7 @@
     "@exact/passkeys": ["@exact/passkeys@file:../exact/packages/passkeys", {}],
 
     "@exact/sign-in": ["@exact/sign-in@file:../exact/packages/sign-in", {}],
+
+    "fflate": ["fflate@0.8.3", "", {}, "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA=="],
   }
 }
