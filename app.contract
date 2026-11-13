@@ -5,6 +5,7 @@
 use EmptyState from "exact:content"
 use getIdentityCapabilities, IdentityCapabilities from "@exact/sign-in"
 use getClientCapabilities, ClientCapabilities from "@exact/passkeys"
+use openBrowser, BrowserResult from "@exact/in-app-browser"
 use showNotification, notificationStatus, requestNotificationPermission, notificationclick, NotificationStatus, NotificationEvent from "@exact/notifications"
 
 // The brand face: Jost (SIL Open Font License), for the wordmark, the lander and generated covers; the app reads in the system face.
@@ -262,8 +263,7 @@ component App
   state sourceId = ""
   // A pasted link to a book file, which the server downloads (server/link.ts).
   state link = ""
-  // Add a Book: the link field shows once asked for, and a link is taken at Go.
-  state linkOn = false
+  // Add a Book: a link is taken at Add, in its own sheet.
   state linkTaken = ""
   state model = ""
   state voice = ""
@@ -321,6 +321,7 @@ component App
   // browses. The player shows it; a copy downloaded with it answers when the server can't.
   state loaded = ""
   resource audiobook = loadAudiobook(loaded) as shape Audiobook else empty()
+  mutation browser as shape BrowserResult
   mutation created as shape Imported refreshes detail, listening, account, mine, shelf then afterCreate
   mutation generated as shape Reply refreshes audiobook, detail, mine then afterGenerate
   mutation removed as shape Reply refreshes detail, listening, mine, shelf then afterRemove
@@ -650,9 +651,10 @@ component App
   action sheetClosed
     if not account.signedIn
       pendingAuth = ""
+  // A search or a library opens over the app (Safari's view on iOS), and Done comes back.
   action openSearch(url: string)
     haptic("selection")
-    openURL(url)
+    send browser = openBrowser(url=url)
   action openCreate
     sourceId = ""
     link = ""
@@ -671,7 +673,6 @@ component App
   action openAdd
     sourceId = ""
     link = ""
-    linkOn = false
     linkTaken = ""
     filePath = ""
     fileName = ""
@@ -689,12 +690,10 @@ component App
         send prefSet = setVoicePref("", "", "")
   action chooseAddFile
     showPicker("add-upload")
-  action showLink
-    linkOn = true
-    refusal = ""
   action takeLink
     if link.trim().startsWith("https://")
       linkTaken = link.trim()
+      close("link-sheet")
       haptic("selection")
     else
       refusal = "Paste a link that starts with https://."
@@ -703,7 +702,6 @@ component App
     fileName = ""
     link = ""
     linkTaken = ""
-    linkOn = false
     refusal = ""
   action chooseFile
     showPicker("upload")
@@ -1006,7 +1004,7 @@ component App
     main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyed notificationclick=noticeOpened testId="app" width="100%" height="100%" viewport-fit="cover" color-scheme="light" accent-color="#14171f"
       for e in stack(nav) key=e.id
         if e.name == "lander"
-          column navigationKey=`${e.id}` navigationBar="none" navigationPresentation="fullscreen" position="absolute" inset=0 overflow="hidden" background-color=(phoneDoor ? "#eceef2" : "#121419") testId="lander"
+          column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color=(phoneDoor ? "#eceef2" : "#121419") testId="lander"
             status-bar-style=(lit ? "light-content" : "dark-content") status-bar-animation="fade"
             background-image="radial-gradient(ellipse closest-side at 50% 45%, rgba(120,128,150,0.16) 0%, rgba(120,128,150,0) 100%)"
             // The painting, behind everything, fading out and drifting up as the page scrolls.
@@ -1126,14 +1124,6 @@ component App
                     text "by" font-size="0.8125rem" color="#9a978f"
                     link href="https://devinliu.xyz" testId="credit-link"
                       text "Devin Liu" font-size="0.8125rem" color="#eeebe4" border-bottom="1px solid rgba(238,235,228,0.35)" padding-bottom=1
-            row align-items="center" padding=(wide ? "28px 7vw" : "14px 20px 14px 24px") position="absolute" top="env(safe-area-inset-top)" left=0 right=0 z-index=5
-              pointer-events="none"
-              view flex=1 display=(phoneDoor ? "none" : "flex")
-                link href="/" testId="wordmark" pointer-events="auto" padding="6px 0" font-size="min(-exact-body, 23px)"
-                  text "EXALT" font-family="Jost" font-weight=500 font-size="0.875em" letter-spacing="0.5em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
-              if not gated
-                link href=path("home") testId="enter" pointer-events="auto" class=Chip font-size="min(-exact-body, 23px)" backgroundMaterial="glass" color-scheme=(lit ? "dark" : "light")
-                  text "Home" font-weight=400 font-size="0.9375em" letter-spacing="0.04em" color=(lit ? "#eeebe4" : "#1b1f2b") transition="color 400ms ease"
         // Home: a shelf in the fog. Six recent books; the one picked comes forward, its controls under it.
         if e.name == "home"
           column navigationKey=`${e.id}` navigationBar="none" position="absolute" inset=0 overflow="hidden" background-color="#eceef2" status-bar-style="dark-content" testId="home"
@@ -1358,27 +1348,33 @@ component App
             scroll id="add-form" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=520 box-sizing="border-box" padding="24px 24px 64px" gap=28
                 if not adding
-                  // Step one: the file.
-                  button press=chooseAddFile appearance="none" aria-label="Upload an EPUB, PDF or TXT" testId="add-upload-box" cursor="pointer"
-                    width="100%" height=280 box-sizing="border-box" border="1.5px dashed rgba(20,23,31,0.18)" border-radius=28 background-color="rgba(255,255,255,0.45)"
-                    display="flex" flex-direction="column" align-items="center" justify-content="center" gap=12 -exact-press-scale=0.98 -exact-press-haptic="impact-light"
-                    image "symbol:document" color="#14171f" width=34 height=34
-                    text "EPUB, PDF or TXT" font-size="0.875rem" color="#8a8f9c"
-                  input type="file" id="add-upload" display="none" change=picked testId="add-upload"
-                  if linkOn
-                    input type="url" value=link input=editLink submit=takeLink autofocus=true placeholder="https://" aria-label="Link to a book file" testId="add-link"
-                      autocapitalize="none" autocomplete="off" spellcheck=false enterkeyhint="go"
-                      width="100%" box-sizing="border-box" appearance="none" font-size="1rem" color="#14171f" text-align="center"
-                      background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.25)" border-radius=0 padding="10px 0" outline="none"
-                  row gap=24 justify-content="center" flex-wrap="wrap"
-                    button press=showLink appearance="none" testId="add-paste" padding="4px 0" cursor="pointer"
-                      text "Paste link" font-size="0.9375rem" color="#14171f"
-                    button press=openSearch("https://z-library.sk") appearance="none" testId="open-zlibrary" padding="4px 0" cursor="pointer"
-                      text "Z-Library" font-size="0.9375rem" color="#6b7080"
-                    button press=openSearch("https://libgen.li") appearance="none" testId="open-libgen" padding="4px 0" cursor="pointer"
-                      text "LibGen" font-size="0.9375rem" color="#6b7080"
-                  if refusal != ""
-                    text refusal font-size="0.875rem" color="#b2463c" text-align="center" testId="add-error"
+                  // Step one: the file, and under it, tight to its edge, the other ways to one.
+                  column gap=12
+                    button press=chooseAddFile appearance="none" aria-label="Upload an EPUB, PDF or TXT" testId="add-upload-box" cursor="pointer"
+                      width="100%" height=280 box-sizing="border-box" border="1.5px dashed rgba(20,23,31,0.18)" border-radius=28 background-color="rgba(255,255,255,0.45)"
+                      display="flex" flex-direction="column" align-items="center" justify-content="center" gap=12 -exact-press-scale=0.98 -exact-press-haptic="impact-light"
+                      image "symbol:document" color="#14171f" width=34 height=34
+                      text "EPUB, PDF or TXT" font-size="0.875rem" color="#8a8f9c"
+                    input type="file" id="add-upload" display="none" change=picked testId="add-upload"
+                    row gap=18 justify-content="flex-start" padding-left=4
+                      button commandfor="link-sheet" command="show-modal" appearance="none" testId="add-paste" padding="4px 0" cursor="pointer"
+                        text "Paste link" font-size="0.9375rem" color="#14171f"
+                      button press=openSearch("https://z-library.sk") appearance="none" testId="open-zlibrary" padding="4px 0" cursor="pointer"
+                        text "Z-Library" font-size="0.9375rem" color="#6b7080"
+                      button press=openSearch("https://libgen.li") appearance="none" testId="open-libgen" padding="4px 0" cursor="pointer"
+                        text "LibGen" font-size="0.9375rem" color="#6b7080"
+                  // A link: a small sheet of its own, the field and Add.
+                  dialog id="link-sheet" aria-label="Paste a link" testId="link-sheet" width="100%"
+                    column gap=18 width="100%" max-width=440 margin="0 auto" box-sizing="border-box" padding="28px 24px calc(env(safe-area-inset-bottom) + 20px)"
+                      input type="url" value=link input=editLink submit=takeLink autofocus=true placeholder="https://" aria-label="Link to a book file" testId="add-link"
+                        autocapitalize="none" autocomplete="off" spellcheck=false enterkeyhint="go"
+                        width="100%" box-sizing="border-box" appearance="none" font-size="1.0625rem" color="#14171f"
+                        background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.25)" border-radius=0 padding="12px 0" outline="none"
+                      if refusal != ""
+                        text refusal font-size="0.875rem" color="#b2463c" testId="add-error"
+                      button press=takeLink buttonStyle="prominent-glass" testId="add-link-go" width="100%" disabled=(link.trim() == "")
+                        text "Add"
+
                 else if pending(preview) or (preview.title == "" and preview.error == "")
                   column height=360 align-items="center" justify-content="center"
                     progress aria-label="Reading the book" testId="add-reading"

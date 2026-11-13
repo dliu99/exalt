@@ -26,8 +26,7 @@ test "below the fold, the lander says what Exalt is and opens the library"
   expect tree has "home-add"
 
 test "an empty library is a + to add a book"
-  clock data
-  tap "enter"
+  at "/home"
   clock data
   expect tree has "app"
   expect tree missing "book-OL1W"
@@ -41,7 +40,6 @@ test "+ opens Add a Book: a box to upload into, Paste link, Z-Library and LibGen
   expect tree has "add-paste"
   expect tree has "open-zlibrary"
   expect tree has "open-libgen"
-  expect tree missing "add-link"
   expect tree missing "model"
   expect tree missing "create-save"
   clock settle

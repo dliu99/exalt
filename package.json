@@ -10,6 +10,7 @@
     "@exact/passkeys": "file:../exact/packages/passkeys",
     "@exact/sign-in": "file:../exact/packages/sign-in",
     "@exact/oauth": "file:../exact/packages/oauth",
-    "@exact/notifications": "file:../exact/packages/notifications"
+    "@exact/notifications": "file:../exact/packages/notifications",
+    "@exact/in-app-browser": "file:../exact/packages/in-app-browser"
   }
 }
