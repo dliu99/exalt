@@ -350,10 +350,6 @@ const sources: Sources = {
       public: g.public === true, voice: str(g.voice),
     }));
   },
-  // Everyone's shared, finished audiobooks, newest first; `q` narrows to a title or author.
-  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
-    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
-  })),
   // One audiobook to play: a shared one, or the person's own private one (hence the session), its
   // chapters, and how many chapters this listener has narrating (of how many at once). Out of
   // reach, a downloaded one answers with the copy kept beside its chapters.
