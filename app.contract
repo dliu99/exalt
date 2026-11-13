@@ -92,6 +92,15 @@ shape Audiobook
   // Whether the signed-in listener made it (and may delete it).
   owner: bool
 
+// What a file or a link is, read before anything is made: Add a Book's second step.
+shape ImportPreview
+  ok: bool
+  error: string
+  title: string
+  author: string
+  cover: string
+  chapters: string[]
+
 // An import's answer: the book it made or matched, whose page opens next.
 shape Imported
   ok: bool
@@ -253,6 +262,9 @@ component App
   state sourceId = ""
   // A pasted link to a book file, which the server downloads (server/link.ts).
   state link = ""
+  // Add a Book: the link field shows once asked for, and a link is taken at Go.
+  state linkOn = false
+  state linkTaken = ""
   state model = ""
   state voice = ""
   state rights = false
@@ -419,6 +431,9 @@ component App
   derive genPending = pending(generated)
   derive voices = match first(models.filter(m => m.id == model)) { case some(m) => m.voices, case none => [] }
   derive createError = match created { case some(r) => r.error, case none => "" }
+  // Add a Book's second step: once a file is picked or a link taken, the book it is.
+  derive adding = filePath != "" or linkTaken != ""
+  resource preview = previewImport(adding ? filePath : "", adding ? fileName : "", adding ? linkTaken : "") as shape ImportPreview else empty(ok=false, error="", title="", author="", cover="", chapters=[])
   derive linkOk = link.trim() == "" or link.trim().startsWith("https://")
   derive canCreate = (filePath != "" or sourceId != "" or link.trim() != "") and linkOk and model != "" and rights and not pending(created)
   derive createHint = pending(created) ? (sourceId != "" or link.trim() != "" ? "Downloading book and preparing audiobook…" : "Uploading…") : filePath == "" and sourceId == "" and link.trim() == "" ? "Choose a book file, paste a link or upload your own." : not linkOk ? "Paste a link that starts with https://." : model == "" ? "Choose a voice model." : not rights ? "Confirm you may share it." : ""
@@ -656,6 +671,8 @@ component App
   action openAdd
     sourceId = ""
     link = ""
+    linkOn = false
+    linkTaken = ""
     filePath = ""
     fileName = ""
     rights = false
@@ -670,6 +687,24 @@ component App
         send prefSet = setVoicePref(v.id, v.title, v.cover)
       case none
         send prefSet = setVoicePref("", "", "")
+  action chooseAddFile
+    showPicker("add-upload")
+  action showLink
+    linkOn = true
+    refusal = ""
+  action takeLink
+    if link.trim().startsWith("https://")
+      linkTaken = link.trim()
+      haptic("selection")
+    else
+      refusal = "Paste a link that starts with https://."
+  action resetAdd
+    filePath = ""
+    fileName = ""
+    link = ""
+    linkTaken = ""
+    linkOn = false
+    refusal = ""
   action chooseFile
     showPicker("upload")
   action pickSource(v: string)
@@ -1210,16 +1245,16 @@ component App
               TopBar(active="")
         // Import: where a book comes from before it is narrated. Anyone can search for it in the
         // browser; signed in, upload it or pick a download, then the voice and the consent.
-        if e.name == "create" or e.name == "add"
-          column navigationKey=`${e.id}` navigationPresentation=(e.name == "add" ? "modal" : "push") navigationScroll="create-form" position="absolute" inset=0 display="flex" flex-direction="column" background-color="#eceef2" testId=(e.name == "add" ? "add" : "create")
+        if e.name == "create"
+          column navigationKey=`${e.id}` navigationScroll="create-form" position="absolute" inset=0 display="flex" flex-direction="column" background-color="#eceef2" testId="create"
             // On iOS the navigation bar: its Back, and the title.
             header display="flex" align-items="center" gap=12 padding=(wide ? "18px 7vw" : "12px 20px")
-              button id="back" press=back aria-label=(e.name == "add" ? "Close" : "Back") testId="create-cancel"
-                image (e.name == "add" ? "symbol:close" : "symbol:back")
-              text (e.name == "add" ? "Add a Book" : "Import") role="heading" aria-level=1
+              button id="back" press=back aria-label="Back" testId="create-cancel"
+                image "symbol:back"
+              text "Import" role="heading" aria-level=1
             scroll id="create-form" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width=640 box-sizing="border-box" padding=(wide ? "40px 48px 96px" : "12px 20px 72px") gap=(wide ? 44 : 36)
-                row gap=20 align-items="center" display=(e.name == "add" ? "none" : "flex")
+                row gap=20 align-items="center"
                   BookCover(src=detail.book.cover, title=detail.book.title, w=(wide ? 72 : 60))
                   column flex=1 min-width=0 gap=6
                     text detail.book.title font-weight=600 font-size="1.0625rem" color="#14171f" line-clamp=2
@@ -1227,25 +1262,16 @@ component App
                 // Find it yourself: the browser searches for the book; what it downloads is uploaded below.
                 column gap=14 testId="find"
                   SectionTitle(label="Find the book")
-                  if e.name == "add"
-                    row gap=10 flex-wrap="wrap"
-                      button press=openSearch("https://z-library.sk") buttonStyle="glass" testId="open-zlibrary"
-                        text "Open Z-Library"
-                      button press=openSearch("https://libgen.li") buttonStyle="glass" testId="open-libgen"
-                        text "Open LibGen"
-                  else
-                    row gap=10 flex-wrap="wrap"
-                      button press=openSearch(libgenSearch(detail.book)) buttonStyle="glass" testId="find-libgen"
-                        text "LibGen"
-                      button press=openSearch(zlibSearch(detail.book)) buttonStyle="glass" testId="find-zlibrary"
-                        text "Z-Library"
-                      button press=openSearch(webSearch(detail.book)) buttonStyle="glass" testId="find-web"
-                        text "Search the web"
+                  row gap=10 flex-wrap="wrap"
+                    button press=openSearch(libgenSearch(detail.book)) buttonStyle="glass" testId="find-libgen"
+                      text "LibGen"
+                    button press=openSearch(zlibSearch(detail.book)) buttonStyle="glass" testId="find-zlibrary"
+                      text "Z-Library"
+                    button press=openSearch(webSearch(detail.book)) buttonStyle="glass" testId="find-web"
+                      text "Search the web"
                 column gap=14
                   SectionTitle(label="Book file")
-                  if e.name == "add"
-                    text "Download it there, then choose the file here, or paste a link to it." font-size="0.9375rem" line-height=1.45 color="#6b7080"
-                  else if pending(bookSources)
+                  if pending(bookSources)
                     row gap=12 align-items="center"
                       progress aria-label="Finding book files"
                       text "Finding EPUB and PDF files…" font-size="0.9375rem" color="#6b7080"
@@ -1321,6 +1347,92 @@ component App
                     text `Signed in as ${account.name}` flex=1 min-width=0 line-clamp=1 font-size="0.875rem" color="#6b7080" testId="account"
                     button press=signOut appearance="none" testId="sign-out" padding="4px 0" cursor="pointer"
                       text "Sign out" font-size="0.875rem" color="#4a4f5c" border-bottom="1px solid rgba(20,23,31,0.2)" padding-bottom=2
+        // Add a Book, a sheet over Home: first the file (a big box to upload into, or a pasted link),
+        // then the book it is, its chapters, and the voice to narrate it.
+        if e.name == "add"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationScroll="add-form" position="absolute" inset=0 display="flex" flex-direction="column" background-color="#eceef2" testId="add"
+            header display="flex" align-items="center" gap=12 padding="12px 20px"
+              button id="back" press=back aria-label="Close" testId="add-close"
+                image "symbol:close"
+              text "Add a Book" role="heading" aria-level=2
+            scroll id="add-form" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
+              column margin="0 auto" width="100%" max-width=520 box-sizing="border-box" padding="24px 24px 64px" gap=28
+                if not adding
+                  // Step one: the file.
+                  button press=chooseAddFile appearance="none" aria-label="Upload an EPUB, PDF or TXT" testId="add-upload-box" cursor="pointer"
+                    width="100%" height=280 box-sizing="border-box" border="1.5px dashed rgba(20,23,31,0.18)" border-radius=28 background-color="rgba(255,255,255,0.45)"
+                    display="flex" flex-direction="column" align-items="center" justify-content="center" gap=12 -exact-press-scale=0.98 -exact-press-haptic="impact-light"
+                    image "symbol:document" color="#14171f" width=34 height=34
+                    text "EPUB, PDF or TXT" font-size="0.875rem" color="#8a8f9c"
+                  input type="file" id="add-upload" display="none" change=picked testId="add-upload"
+                  if linkOn
+                    input type="url" value=link input=editLink submit=takeLink autofocus=true placeholder="https://" aria-label="Link to a book file" testId="add-link"
+                      autocapitalize="none" autocomplete="off" spellcheck=false enterkeyhint="go"
+                      width="100%" box-sizing="border-box" appearance="none" font-size="1rem" color="#14171f" text-align="center"
+                      background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.25)" border-radius=0 padding="10px 0" outline="none"
+                  row gap=24 justify-content="center" flex-wrap="wrap"
+                    button press=showLink appearance="none" testId="add-paste" padding="4px 0" cursor="pointer"
+                      text "Paste link" font-size="0.9375rem" color="#14171f"
+                    button press=openSearch("https://z-library.sk") appearance="none" testId="open-zlibrary" padding="4px 0" cursor="pointer"
+                      text "Z-Library" font-size="0.9375rem" color="#6b7080"
+                    button press=openSearch("https://libgen.li") appearance="none" testId="open-libgen" padding="4px 0" cursor="pointer"
+                      text "LibGen" font-size="0.9375rem" color="#6b7080"
+                  if refusal != ""
+                    text refusal font-size="0.875rem" color="#b2463c" text-align="center" testId="add-error"
+                else if pending(preview) or (preview.title == "" and preview.error == "")
+                  column height=360 align-items="center" justify-content="center"
+                    progress aria-label="Reading the book" testId="add-reading"
+                else if not preview.ok
+                  column gap=20 align-items="center" padding-top=80
+                    text (preview.error != "" ? preview.error : "That file isn’t a book we can read.") font-size="1rem" color="#14171f" text-align="center" testId="add-error"
+                    button press=resetAdd appearance="none" testId="add-again" padding="4px 0" cursor="pointer"
+                      text "Choose another" font-size="0.9375rem" color="#6b7080"
+                else
+                  // Step two: the book, in the lander's face, with room around it.
+                  column gap=14 align-items="center" padding-top=24 testId="add-book"
+                    BookCover(src=preview.cover, title=preview.title, w=168)
+                    column gap=8 align-items="center" padding-top=18
+                      text preview.title role="heading" aria-level=3 font-family="Jost" font-weight=300 font-size="1.75rem" line-height=1.25 letter-spacing="-0.01em" color="#14171f" text-align="center" testId="add-title"
+                      if preview.author != ""
+                        text preview.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="#6b7080" text-align="center" testId="add-author"
+                  column testId="add-chapters"
+                    text `${preview.chapters.length} ${preview.chapters.length == 1 ? "chapter" : "chapters"}` font-size="0.8125rem" color="#8a8f9c" padding-bottom=6
+                    for c, i in preview.chapters.slice(0, 40) key=i
+                      row gap=14 padding="9px 0" border-top="1px solid rgba(20,23,31,0.06)"
+                        text `${i + 1}` font-size="0.8125rem" color="#8a8f9c" width="1.75rem" font-variant-numeric="tabular-nums"
+                        text c font-size="0.9375rem" color="#14171f" flex=1 min-width=0 line-clamp=1
+                  column gap=10
+                    select value=model change=pickModel aria-label="Model" testId="model" width="100%" box-sizing="border-box"
+                      font-size="1rem" color="#14171f" background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.2)" border-radius=0 padding="10px 0" outline="none"
+                      option "Model" value=""
+                      for m in models key=m.id
+                        option m.name value=m.id
+                    if fishModel
+                      select value=voicePref.id change=pickVoice aria-label="Voice" testId="create-voice" width="100%" box-sizing="border-box"
+                        font-size="1rem" color="#14171f" background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.2)" border-radius=0 padding="10px 0" outline="none"
+                        option "Default voice" value=""
+                        if voicePref.id != "" and voiceList.filter(v => v.id == voicePref.id).length == 0
+                          option voicePref.title value=voicePref.id
+                        for v in voiceList key=v.id
+                          option v.title value=v.id
+                    else if voices.length > 0
+                      select value=voice change=editVoice aria-label="Voice" testId="voice" width="100%" box-sizing="border-box"
+                        font-size="1rem" color="#14171f" background-color="transparent" border="none" border-bottom="1px solid rgba(20,23,31,0.2)" border-radius=0 padding="10px 0" outline="none"
+                        option "Default voice" value=""
+                        for v in voices key=v
+                          option v value=v
+                    row gap=10 align-items="center" padding-top=6
+                      input type="checkbox" checked=rights change=setRights aria-label="I may share this book" testId="rights" accent-color="#14171f" width=18 height=18 flex-shrink=0
+                      text "I may share this book" font-size="0.875rem" color="#6b7080"
+                  column gap=12 align-items="center"
+                    button press=create buttonStyle="prominent-glass" testId="create-save" disabled=(not canCreate)
+                      text "Generate"
+                    if pending(created)
+                      progress aria-label="Starting"
+                    if refusal != ""
+                      text refusal font-size="0.875rem" color="#b2463c" text-align="center" testId="create-hint"
+                    button press=resetAdd appearance="none" testId="add-again" padding="4px 0" cursor="pointer"
+                      text "Choose another" font-size="0.875rem" color="#8a8f9c"
         // The player, in the dark: the cover lights the room, and the controls float on glass.
         if e.name == "play"
           column navigationKey=`${e.id}` navigationBar="none" navigationPresentation="fullscreen" navigationScroll="player" position="absolute" inset=0 background-color="#121419" color-scheme="dark" status-bar-style="light-content" testId="player"
