@@ -2,7 +2,7 @@ import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.t
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
-import { bookMeta, readBook } from './server/book.ts';
+import { readBook } from './server/book.ts';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -40,12 +40,24 @@ type Imported = Result<'importBook'>;
 type ImportPreview = Result<'previewImport'>;
 // A preview's cover goes inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
 const PREVIEW_COVER_BYTES = 700 * 1024;
+// The most storage.fs.readFile answers; a picked book past it is previewed by the server.
+const LOCAL_READ_BYTES = 16 * 1024 * 1024;
 const COVER_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' } as const;
-const base64 = (bytes: Uint8Array) => {
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-};
+// A turn of the data module has a budget (100 ms on an interpreter): the long reads below end theirs
+// as they go, and go on in a new one.
+const nextTurn = () => scheduler.yield();
+// Base64 a few slices a turn: each slice a multiple of three bytes, so the pieces join as one.
+async function base64(bytes: Uint8Array): Promise<string> {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3 * 8192) {
+    const slice = bytes.subarray(i, i + 3 * 8192);
+    let bin = '';
+    for (let j = 0; j < slice.length; j += 0x2000) bin += String.fromCharCode(...slice.subarray(j, j + 0x2000));
+    out += btoa(bin);
+    if (i % (3 * 8192 * 4) === 0) await nextTurn();
+  }
+  return out;
+}
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 
@@ -392,21 +404,24 @@ const sources: Sources = {
     }
   },
   // What a picked file (`path`, named `name`) or a pasted `link` is, before it is imported: its
-  // title, author, cover (a data: URL, or "") and chapter titles. A picked EPUB or TXT is read here,
-  // as the server reads it (server/book.ts), in the time it takes to unzip; a PDF or a link goes to
-  // the server, which keeps what it read for Generate (`token`).
+  // title, author, cover (a data: URL, or "") and chapter titles. A picked EPUB or TXT of up to
+  // 16 MiB is read here, as the server reads it (server/book.ts); a PDF, a larger file or a link goes
+  // to the server, which keeps what it read for Generate (`token`).
   previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
     const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '' });
     // Nothing picked or pasted yet: nothing to ask.
     if (!path && !link) return none('');
     try {
-      if (!link && /\.(epub|txt)$/i.test(name)) {
+      // readFile answers at most 16 MiB: a larger book goes to the server, from disk (below).
+      const size = !link && /\.(epub|txt)$/i.test(name) ? await storage.fs.stat(path).then((st) => st.size, () => -1) : -1;
+      if (size >= 0 && size <= LOCAL_READ_BYTES) {
         const read = await storage.fs.readFile(path);
         const bytes = read instanceof Uint8Array ? read : new Uint8Array(read);
         try {
-          const chapters = readBook(name, bytes);
-          const meta = bookMeta(name, bytes);
-          const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${base64(meta.cover.bytes)}` : '';
+          // The zip's directory read here, the entries the book needs inflated natively, a turn ended
+          // between files and chapters (server/book.ts).
+          const { chapters, meta } = await readBook(name, bytes, nextTurn);
+          const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${await base64(meta.cover.bytes)}` : '';
           return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
             chapters: chapters.map((c) => c.title), token: '' };
         } catch (e) { return none(String((e as Error)?.message ?? e)); }

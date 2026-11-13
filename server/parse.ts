@@ -9,9 +9,9 @@ export { bookMeta, type BookMeta, type Chapter } from './book.ts';
 export async function parseBook(name: string, bytes: Uint8Array): Promise<Chapter[]> {
   if (bytes.length > MAX_BOOK_BYTES) throw new Error('Book files must be under 50 MB.');
   const ext = name.toLowerCase().split('.').pop();
-  const chapters = ext === 'pdf' ? await parsePdf(bytes) : readChapters(name, bytes);
+  const chapters = ext === 'pdf' ? await parsePdf(bytes) : await readChapters(name, bytes);
   if (!chapters) throw new Error('Upload an EPUB, PDF or TXT file.');
-  return keptChapters(chapters, MAX_TEXT_CHARS);
+  return await keptChapters(chapters, MAX_TEXT_CHARS);
 }
 
 type Pdf = Awaited<ReturnType<typeof import('unpdf')['getDocumentProxy']>>;

@@ -1,6 +1,9 @@
 // An EPUB or TXT book to chapters of plain text, and what an EPUB says of itself (title, author,
-// cover). Only fflate: the app reads a picked EPUB or TXT with this module itself (app.ts
-// previewImport), and the server's parse.ts uses it for these and adds PDF. EPUB follows its table
+// cover). The app reads a picked EPUB or TXT with this module itself (app.ts previewImport), and the
+// server's parse.ts uses it for these and adds PDF. The server opens a zip with fflate (fflateZip);
+// the app reads its central directory and inflates only the entries it reads with the host's native
+// DecompressionStream (nativeZip), ending its turn (`pause`) between files and chapters, since the
+// app's data module runs on an interpreter with a budget per turn. Both read the same chapters. EPUB follows its table
 // of contents (the EPUB 3 nav, else the EPUB 2 NCX) and falls back to the spine; TXT splits at
 // "Chapter" headings. Cover, title, copyright, contents, index and similar pages are left out;
 // forewords, prefaces, introductions, prologues and epilogues stay. Anything without chapters is cut
@@ -15,25 +18,105 @@ export const OPENING_WORDS = 200;
 // The narration limit's default; the server's is limits.ts MAX_TEXT_CHARS (MAX_BOOK_CHARACTERS).
 export const DEFAULT_MAX_CHARS = 5000000;
 
+// Where a long read may end its turn: the app's `() => scheduler.yield()`; the server's, nothing.
+export type Pause = () => Promise<void> | void;
+const noPause: Pause = () => {};
+
+// A zip's entries (name, size once inflated), and one entry's bytes read on asking.
+export type ZipEntry = { name: string; size: number };
+export type Zip = { entries: ZipEntry[]; read(path: string): Promise<Uint8Array | undefined> };
+const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
+
+/** A zip opened with fflate (the server's): its directory at once, each entry inflated on asking. */
+export function fflateZip(bytes: Uint8Array): Zip {
+  const entries: ZipEntry[] = [];
+  unzipSync(bytes, { filter(f) { entries.push({ name: f.name, size: f.originalSize }); return false; } });
+  const kept = new Map<string, Uint8Array | undefined>();
+  return { entries, async read(path) {
+    if (!kept.has(path)) kept.set(path, entries.some((e) => e.name === path) ? unzipSync(bytes, { filter: (f) => f.name === path })[path] : undefined);
+    return kept.get(path);
+  } };
+}
+
+/** A zip opened by its central directory (the app's): an entry is inflated by the host's native
+ * DecompressionStream when it is read, so nothing it isn't asked for (images) is inflated. */
+export function nativeZip(bytes: Uint8Array): Zip {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const bad = () => new Error('This EPUB could not be read.');
+  // The end of central directory record: its signature, within the last 64 KiB and 22 bytes.
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
+  if (end < 0) throw bad();
+  const count = view.getUint16(end + 10, true);
+  let at = view.getUint32(end + 16, true);
+  if (count === 0xffff || at === 0xffffffff) throw bad();
+  const latin1 = (b: Uint8Array) => { let out = ''; for (let i = 0; i < b.length; i++) out += String.fromCharCode(b[i]); return out; };
+  const found = new Map<string, { method: number; packed: number; size: number; local: number }>();
+  const entries: ZipEntry[] = [];
+  for (let n = 0; n < count; n++) {
+    if (at + 46 > bytes.length || view.getUint32(at, true) !== 0x02014b50) throw bad();
+    const flags = view.getUint16(at + 8, true), method = view.getUint16(at + 10, true);
+    const packed = view.getUint32(at + 20, true), size = view.getUint32(at + 24, true);
+    const nameLen = view.getUint16(at + 28, true), extraLen = view.getUint16(at + 30, true), commentLen = view.getUint16(at + 32, true);
+    const raw = bytes.subarray(at + 46, at + 46 + nameLen);
+    // As fflate names it: UTF-8 when the entry says so, else Latin-1.
+    const name = flags & 0x800 ? utf8(raw) : latin1(raw);
+    if (!found.has(name)) found.set(name, { method, packed, size, local: view.getUint32(at + 42, true) });
+    entries.push({ name, size });
+    at += 46 + nameLen + extraLen + commentLen;
+  }
+  const kept = new Map<string, Promise<Uint8Array | undefined>>();
+  const inflate = async (path: string): Promise<Uint8Array | undefined> => {
+    const e = found.get(path);
+    if (!e) return undefined;
+    if (view.getUint32(e.local, true) !== 0x04034b50) throw bad();
+    const from = e.local + 30 + view.getUint16(e.local + 26, true) + view.getUint16(e.local + 28, true);
+    const data = bytes.subarray(from, from + e.packed);
+    if (e.method === 0) return data.slice();
+    if (e.method !== 8) throw bad();
+    const stream = new DecompressionStream('deflate-raw');
+    const writer = stream.writable.getWriter();
+    // The read is pending before the write: a write waits for one.
+    const out = new Response(stream.readable).arrayBuffer();
+    // A view on the picked file's own ArrayBuffer (never a shared one).
+    await writer.write(data as Uint8Array<ArrayBuffer>);
+    await writer.close();
+    return new Uint8Array(await out);
+  };
+  return { entries, read(path) {
+    if (!kept.has(path)) kept.set(path, inflate(path));
+    return kept.get(path)!;
+  } };
+}
+
 /** An EPUB's or TXT's chapters as raw text, or null for any other kind of file. */
-export function readChapters(name: string, bytes: Uint8Array): Chapter[] | null {
+export async function readChapters(name: string, bytes: Uint8Array, pause: Pause = noPause, open: (b: Uint8Array) => Zip = fflateZip): Promise<Chapter[] | null> {
   const ext = name.toLowerCase().split('.').pop();
-  return ext === 'epub' ? parseEpub(bytes) : ext === 'txt' ? parseTxt(new TextDecoder().decode(bytes)) : null;
+  return ext === 'epub' ? parseEpub(open(bytes), pause) : ext === 'txt' ? parseTxt(utf8(bytes), pause) : null;
 }
 
 /** The chapters to narrate: ligatures read, space tidied, ones with too few words left out, the book within the limit. */
-export function keptChapters(chapters: Chapter[], maxChars = DEFAULT_MAX_CHARS): Chapter[] {
-  const kept = chapters.map((c) => ({ title: unligate(c.title), text: tidy(unligate(c.text)) })).filter((c) => c.text.split(' ').length >= 20);
+export async function keptChapters(chapters: Chapter[], maxChars = DEFAULT_MAX_CHARS, pause: Pause = noPause): Promise<Chapter[]> {
+  const kept: Chapter[] = [];
+  for (const c of chapters) {
+    const k = { title: unligate(c.title), text: tidy(unligate(c.text)) };
+    if (k.text.split(' ').length >= 20) kept.push(k);
+    await pause();
+  }
   if (kept.length === 0) throw new Error('No readable text was found in this file.');
   if (kept.reduce((n, c) => n + c.text.length + c.title.length, 0) > maxChars) throw new Error(`This book exceeds the ${maxChars.toLocaleString('en-US')}-character narration limit.`);
   return kept;
 }
 
-/** An EPUB or TXT read as the server reads it: its chapters to narrate (or why not). */
-export function readBook(name: string, bytes: Uint8Array, maxChars = DEFAULT_MAX_CHARS): Chapter[] {
-  const chapters = readChapters(name, bytes);
-  if (!chapters) throw new Error('Upload an EPUB, PDF or TXT file.');
-  return keptChapters(chapters, maxChars);
+/** An EPUB or TXT read as the server reads it: its chapters to narrate (or why not), and what it
+ * says of itself. The app's: the zip opened natively, a turn ended between files and chapters. */
+export async function readBook(name: string, bytes: Uint8Array, pause: Pause = noPause, open: (b: Uint8Array) => Zip = nativeZip): Promise<{ chapters: Chapter[]; meta: BookMeta }> {
+  const ext = name.toLowerCase().split('.').pop();
+  if (ext !== 'epub' && ext !== 'txt') throw new Error('Upload an EPUB, PDF or TXT file.');
+  const zip = ext === 'epub' ? open(bytes) : null;
+  const raw = zip ? await parseEpub(zip, pause) : await parseTxt(utf8(bytes), pause);
+  const chapters = await keptChapters(raw, DEFAULT_MAX_CHARS, pause);
+  return { chapters, meta: zip ? await zipMeta(zip) : { title: '', author: '', cover: null } };
 }
 
 export const tidy = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -52,14 +135,22 @@ function parts(text: string, label = 'Part'): Chapter[] {
   return out;
 }
 
-function parseTxt(text: string): Chapter[] {
+// Headings are found 64 KiB of lines at a time, a turn each: a piece ends just after a newline, so
+// every line is whole in one piece and its matches are those of the whole text.
+async function parseTxt(text: string, pause: Pause): Promise<Chapter[]> {
   const heading = /^[ \t]*((?:chapter|book|part)\b[^\n]{0,80})$/gim;
-  const marks = [...text.matchAll(heading)];
+  const marks: { index: number; length: number; title: string }[] = [];
+  for (let from = 0; from < text.length;) {
+    const nl = text.indexOf('\n', from + 65536), to = nl < 0 ? text.length : nl + 1;
+    for (const m of text.slice(from, to).matchAll(heading)) marks.push({ index: from + m.index!, length: m[0].length, title: m[1] });
+    from = to;
+    await pause();
+  }
   if (marks.length < 2) return parts(text);
   const out: Chapter[] = [];
   const front = text.slice(0, marks[0].index);
   if (tidy(front).split(' ').length > 200) out.push({ title: 'Opening', text: front });
-  marks.forEach((m, i) => out.push({ title: tidy(m[1]), text: text.slice(m.index! + m[0].length, marks[i + 1]?.index ?? text.length) }));
+  marks.forEach((m, i) => out.push({ title: tidy(m.title), text: text.slice(m.index + m.length, marks[i + 1]?.index ?? text.length) }));
   return out;
 }
 
@@ -201,33 +292,35 @@ function unheaded(html: string, title: string): string {
 }
 const headingOf = (html: string) => tidy(htmlText(html.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1] ?? ''));
 
-function parseEpub(bytes: Uint8Array): Chapter[] {
+async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
+  // Images/fonts aren't needed for narration. Bound expansion before reading entries.
   let expanded = 0;
-  const files = unzipSync(bytes, { filter(file) {
-    // Images/fonts aren't needed for narration. Bound expansion before allocating entries.
-    if (!/\.(xml|opf|xhtml|html|htm|ncx)$/i.test(file.name)) return false;
-    expanded += file.originalSize;
-    if (expanded > 50 * 1024 * 1024 || file.originalSize > 8 * 1024 * 1024) throw new Error('The EPUB expands beyond the text extraction limit.');
-    return true;
-  } });
-  const names = new Map(Object.keys(files).map((p) => [p.toLowerCase(), p]));
-  const real = (path: string) => (files[path] ? path : names.get(path.toLowerCase()) ?? path);
-  const read = (path: string) => (files[real(path)] ? strFromU8(files[real(path)]) : '');
-  const opfPath = attr(read('META-INF/container.xml').match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
-  const opf = read(opfPath);
+  const text = zip.entries.filter((e) => /\.(xml|opf|xhtml|html|htm|ncx)$/i.test(e.name));
+  for (const e of text) {
+    expanded += e.size;
+    if (expanded > 50 * 1024 * 1024 || e.size > 8 * 1024 * 1024) throw new Error('The EPUB expands beyond the text extraction limit.');
+  }
+  const files = new Set(text.map((e) => e.name));
+  const names = new Map(text.map((e) => [e.name.toLowerCase(), e.name]));
+  const real = (path: string) => (files.has(path) ? path : names.get(path.toLowerCase()) ?? path);
+  const read = async (path: string) => { const b = files.has(real(path)) ? await zip.read(real(path)) : undefined; return b ? utf8(b) : ''; };
+  const opfPath = attr((await read('META-INF/container.xml')).match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
+  const opf = await read(opfPath);
   if (!opf) throw new Error('This EPUB has no package file.');
   const items = new Map<string, { file: string; type: string; props: string }>();
   for (const tag of opf.match(/<item\b[^>]*>/gi) ?? []) {
     const target = resolve(opfPath, attr(tag, 'href'));
     if (target) items.set(attr(tag, 'id'), { file: real(target.file), type: attr(tag, 'media-type'), props: attr(tag, 'properties') });
   }
-  const docs: Doc[] = (opf.match(/<itemref\b[^>]*>/gi) ?? []).flatMap((tag) => {
+  const docs: Doc[] = [];
+  for (const tag of opf.match(/<itemref\b[^>]*>/gi) ?? []) {
     const item = items.get(attr(tag, 'idref'));
-    if (!item) return [];
-    const html = read(item.file);
+    if (!item) continue;
+    const html = await read(item.file);
     const body = html.search(/<body\b/i), head = html.search(/<\/head\s*>/i), close = html.search(/<\/body\s*>/i);
-    return [{ file: item.file, html, start: body >= 0 ? body : head >= 0 ? html.indexOf('>', head) + 1 : 0, end: close >= 0 ? close : html.length, linear: attr(tag, 'linear').toLowerCase() !== 'no' }];
-  });
+    docs.push({ file: item.file, html, start: body >= 0 ? body : head >= 0 ? html.indexOf('>', head) + 1 : 0, end: close >= 0 ? close : html.length, linear: attr(tag, 'linear').toLowerCase() !== 'no' });
+    await pause();
+  }
   const spineIndex = new Map<string, number>();
   docs.forEach((d, k) => { if (!spineIndex.has(d.file)) spineIndex.set(d.file, k); });
 
@@ -254,9 +347,17 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
   const manifest = [...items.values()];
   const navItem = manifest.find((i) => i.props.split(/\s+/).includes('nav'));
   const ncxItem = items.get(attr(opf.match(/<spine\b[^>]*>/i)?.[0] ?? '', 'toc')) ?? manifest.find((i) => i.type === 'application/x-dtbncx+xml');
-  const nav = navItem ? navOf(read(navItem.file), navItem.file) : { toc: [], landmarks: [] };
-  const toc = nav.toc.length ? nav.toc : ncxItem ? ncxOf(read(ncxItem.file), ncxItem.file) : [];
+  const nav = navItem ? navOf(await read(navItem.file), navItem.file) : { toc: [], landmarks: [] };
+  await pause();
+  const toc = nav.toc.length ? nav.toc : ncxItem ? ncxOf(await read(ncxItem.file), ncxItem.file) : [];
+  await pause();
   const guide = (opf.match(/<reference\b[^>]*>/gi) ?? []).map((tag) => ({ types: attr(tag, 'type'), target: resolve(opfPath, attr(tag, 'href')) }));
+  // The ids of every file an entry points into, a file a turn (spot reads them).
+  const targets = (es: Entry<Target>[]): (Target | null)[] => es.flatMap((e) => [e.at ?? null, ...targets(e.children)]);
+  for (const t of [...targets(toc), ...nav.landmarks.map((l) => l.target), ...guide.map((g) => g.target)]) {
+    const k = t?.frag ? spineIndex.get(real(t.file)) : undefined;
+    if (k !== undefined && !ids.has(k)) { idsOf(k); await pause(); }
+  }
   const marked = new Set([...nav.landmarks, ...guide].filter((l) => isMatterType(l.types.toLowerCase().split(/\s+/))).flatMap((l) => {
     const s = spot(l.target);
     return s ? [key(s)] : [];
@@ -274,16 +375,18 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
     return matterAt({ k, at: from }) || isMatterTitle(title) || isLegal(text) ? null : { title: title || fallback, text };
   };
 
-  const bySpine = () => {
+  const bySpine = async () => {
     const out: Chapter[] = [];
-    docs.forEach((d, k) => {
+    for (let k = 0; k < docs.length; k++) {
+      const d = docs[k];
       const c = d.linear ? loose(k, d.start, d.end, `Section ${out.length + 1}`) : null;
       if (c) out.push(c);
-    });
+      await pause();
+    }
     return out;
   };
 
-  const byToc = (): Chapter[] | null => {
+  const byToc = async (): Promise<Chapter[] | null> => {
     const place = (entries: Entry<Target>[]): Entry<Spot>[] => entries
       .map((e) => ({ title: e.title, at: spot(e.at), children: place(e.children) }))
       .filter((e) => e.at || e.children.length);
@@ -297,9 +400,12 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
       const d = docs[k], to = k === first.k ? first.at : d.end;
       const c = d.linear && to > d.start ? loose(k, d.start, to, 'Opening') : null;
       if (c && words(c.text) >= OPENING_WORDS) out.push(c);
+      await pause();
     }
     let listed = 0;
-    list.forEach((e, i) => {
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      await pause();
       const end = list[i + 1]?.at ?? { k: docs.length - 1, at: docs[docs.length - 1].end };
       let html = '';
       // Files between two entries continue the first one's chapter, unless they're front or back matter.
@@ -318,18 +424,18 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
         // Before the first chapter, unlisted files after a skipped page are read like the ones before
         // the first entry (an untitled prologue stays); after it, they're the rest of the back matter.
         if (listed === 0) for (const c of follow) if (words(c.text) >= OPENING_WORDS) out.push({ title: c.title || 'Opening', text: c.text });
-        return;
+        continue;
       }
-      if (e.part && words(text) < OPENING_WORDS) return;
+      if (e.part && words(text) < OPENING_WORDS) continue;
       out.push({ title, text });
       listed++;
-    });
+    }
     return out;
   };
 
-  const chapters = byToc();
+  const chapters = await byToc();
   if (chapters && chapters.length >= 2) return chapters;
-  const spine = bySpine();
+  const spine = await bySpine();
   return chapters && chapters.length >= spine.length ? chapters : spine;
 }
 
@@ -338,6 +444,23 @@ function parseEpub(bytes: Uint8Array): Chapter[] {
 // WebP or GIF.
 export type BookMeta = { title: string; author: string; cover: { bytes: Uint8Array; ext: 'jpg' | 'png' | 'webp' | 'gif' } | null };
 const MAX_COVER_BYTES = 5 * 1024 * 1024;
+
+// The OPF's title, first author, and the path of its cover image: the manifest item marked
+// cover-image, else the one an EPUB 2 <meta name="cover"> names, else an image named for a cover.
+function opfMeta(opf: string, opfPath: string): { title: string; author: string; cover: string } {
+  const text = (tag: string) => tidy(htmlText(opf.match(new RegExp(`<dc:${tag}\\b[^>]*>([\\s\\S]*?)</dc:${tag}>`, 'i'))?.[1] ?? '')).slice(0, 200);
+  const base = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+  const items = (opf.match(/<item\b[^>]*>/gi) ?? []).map((tag) => ({ id: attr(tag, 'id'), href: attr(tag, 'href'), type: attr(tag, 'media-type'), props: attr(tag, 'properties') }));
+  const metaCover = (opf.match(/<meta\b[^>]*>/gi) ?? []).find((tag) => attr(tag, 'name') === 'cover');
+  const item = items.find((i) => i.props.split(/\s+/).includes('cover-image'))
+    ?? (metaCover ? items.find((i) => i.id === attr(metaCover, 'content')) : undefined)
+    ?? items.find((i) => (i.type.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(i.href)) && /cover/i.test(i.id + i.href));
+  return { title: text('title'), author: text('creator'), cover: item?.href ? base + decodeURIComponent(item.href.split('#')[0]) : '' };
+}
+const coverOf = (found: Uint8Array | undefined): BookMeta['cover'] => {
+  const ext = found && found.length <= MAX_COVER_BYTES ? imageType(found) : null;
+  return found && ext ? { bytes: found, ext } : null;
+};
 
 export function bookMeta(name: string, bytes: Uint8Array): BookMeta {
   const none = { title: '', author: '', cover: null };
@@ -348,21 +471,27 @@ export function bookMeta(name: string, bytes: Uint8Array): BookMeta {
     const opfPath = attr(read('META-INF/container.xml').match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
     const opf = read(opfPath);
     if (!opf) return none;
-    const text = (tag: string) => tidy(htmlText(opf.match(new RegExp(`<dc:${tag}\\b[^>]*>([\\s\\S]*?)</dc:${tag}>`, 'i'))?.[1] ?? '')).slice(0, 200);
-    const base = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
-    const items = (opf.match(/<item\b[^>]*>/gi) ?? []).map((tag) => ({ id: attr(tag, 'id'), href: attr(tag, 'href'), type: attr(tag, 'media-type'), props: attr(tag, 'properties') }));
-    const metaCover = (opf.match(/<meta\b[^>]*>/gi) ?? []).find((tag) => attr(tag, 'name') === 'cover');
-    const item = items.find((i) => i.props.split(/\s+/).includes('cover-image'))
-      ?? (metaCover ? items.find((i) => i.id === attr(metaCover, 'content')) : undefined)
-      ?? items.find((i) => (i.type.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(i.href)) && /cover/i.test(i.id + i.href));
-    let cover: BookMeta['cover'] = null;
-    if (item?.href) {
-      const path = base + decodeURIComponent(item.href.split('#')[0]);
-      const found = unzipSync(bytes, { filter: (f) => f.name === path && f.originalSize <= MAX_COVER_BYTES })[path];
-      const ext = found && found.length <= MAX_COVER_BYTES ? imageType(found) : null;
-      if (found && ext) cover = { bytes: found, ext };
-    }
-    return { title: text('title'), author: text('creator'), cover };
+    const m = opfMeta(opf, opfPath);
+    const cover = m.cover ? coverOf(unzipSync(bytes, { filter: (f) => f.name === m.cover && f.originalSize <= MAX_COVER_BYTES })[m.cover]) : null;
+    return { title: m.title, author: m.author, cover };
+  } catch { return none; }
+}
+
+/** bookMeta from an opened zip: the app's, whose entries are read as they're asked for. */
+export async function zipMeta(zip: Zip): Promise<BookMeta> {
+  const none = { title: '', author: '', cover: null };
+  try {
+    const sized = (path: string, max: number) => zip.entries.some((e) => e.name === path && e.size <= max);
+    const read = async (path: string) => {
+      const b = /\.(xml|opf)$/i.test(path) && sized(path, 8 * 1024 * 1024) ? await zip.read(path) : undefined;
+      return b ? utf8(b) : '';
+    };
+    const opfPath = attr((await read('META-INF/container.xml')).match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
+    const opf = await read(opfPath);
+    if (!opf) return none;
+    const m = opfMeta(opf, opfPath);
+    const cover = m.cover && sized(m.cover, MAX_COVER_BYTES) ? coverOf(await zip.read(m.cover)) : null;
+    return { title: m.title, author: m.author, cover };
   } catch { return none; }
 }
 
