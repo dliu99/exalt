@@ -1069,13 +1069,11 @@ component App
         // Add a Book, a sheet over Home: first the file (a big box to upload into, or a pasted link),
         // then the book it is, its chapters, and the voice to narrate it.
         if e.name == "add"
-          column navigationKey=`${e.id}` navigationPresentation="modal" navigationScroll="add-form" position="absolute" inset=0 display="flex" flex-direction="column" color-scheme="light" background-color="light-dark(#eceef2, #eceef2)" testId="add"
-            header display="flex" align-items="center" gap=12 padding="12px 20px"
-              button id="back" press=back aria-label="Close" testId="import-cancel"
-                image "symbol:close"
-              text "Add a Book" role="heading" aria-level=2
+          column navigationKey=`${e.id}` navigationBar="none" navigationScroll="add-form" position="absolute" inset=0 display="flex" flex-direction="column" color-scheme="light" status-bar-style="dark-content" background-color="light-dark(#eceef2, #eceef2)" testId="add"
+            // A page of its own, no bar: its way back floats on glass, as Home's account does.
+            text "Add a Book" role="heading" aria-level=1 position="absolute" width="0.0625rem" height="0.0625rem" overflow="hidden" opacity=0
             scroll id="add-form" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
-              column margin="0 auto" width="100%" max-width=520 box-sizing="border-box" padding="24px 24px 64px" gap=28
+              column margin="0 auto" width="100%" max-width=520 box-sizing="border-box" padding="calc(env(safe-area-inset-top) + 76px) 24px 64px" gap=28
                 if not adding
                   // Step one: the file, and under it, tight to its edge, the other ways to one.
                   column gap=12
@@ -1188,6 +1186,8 @@ component App
                     progress aria-label="Starting" color="light-dark(#f4f2ec, #f4f2ec)"
                   else
                     text "Generate" font-size="1rem" font-weight=600 color="light-dark(#f4f2ec, #f4f2ec)"
+            button id="back" press=back aria-label="Back" testId="import-cancel" class=Round backgroundMaterial="glass" position="absolute" top="calc(env(safe-area-inset-top) + 8px)" left=16 z-index=5 -exact-press-haptic="impact-light"
+              image "symbol:back" color="light-dark(#14171f, #14171f)" width=18 height=18
         // The player, in the dark: the cover lights the room, and the controls float on glass. What it
         // plays is App's (below), so leaving it keeps the chapter playing in the mini player.
         if e.name == "play"
