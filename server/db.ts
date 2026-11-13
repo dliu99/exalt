@@ -57,6 +57,23 @@ for (const [name, type] of [['bytes', 'INTEGER NOT NULL DEFAULT 0'], ['storage',
 }
 db.run('CREATE INDEX IF NOT EXISTS generations_status ON generations(status)');
 db.run('CREATE INDEX IF NOT EXISTS generations_book ON generations(book_id)');
+// A version's chapters, narrated one at a time when someone asks (jobs.ts). Each keeps its text
+// until it is narrated; then only its audio (`tracks`) is kept. Versions made before this kept no
+// text once done, so a chapter of theirs that never got audio is `unavailable`.
+db.run(`CREATE TABLE IF NOT EXISTS chapters (
+  generation_id INTEGER NOT NULL REFERENCES generations(id),
+  idx INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  text TEXT,                              -- NULL once narrated (or never kept)
+  status TEXT NOT NULL,                   -- idle | queued | working | ready | failed | unavailable
+  requested_by INTEGER,                   -- the account whose Generate it was, for its limit
+  requested_at INTEGER NOT NULL DEFAULT 0,
+  parts_done INTEGER NOT NULL DEFAULT 0,  -- speech requests answered, while narrating
+  parts_total INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (generation_id, idx)
+)`);
+db.run('CREATE INDEX IF NOT EXISTS chapters_status ON chapters(status, requested_at)');
 db.run('CREATE INDEX IF NOT EXISTS tracks_file ON tracks(file)');
 // The server's own small values, such as the key that signs private audio URLs (signing.ts).
 db.run('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
@@ -69,6 +86,10 @@ export type GenerationRow = {
 export type TrackRow = { generation_id: number; idx: number; title: string; file: string; bytes: number; storage: string };
 // An audiobook with its book's title, author and cover.
 export type AudiobookRow = GenerationRow & { title: string; author: string; cover: string };
+export type ChapterRow = {
+  generation_id: number; idx: number; title: string; text: string | null; status: string; requested_by: number | null;
+  requested_at: number; parts_done: number; parts_total: number; error: string;
+};
 
 export const getBook = (id: string) => db.query('SELECT * FROM books WHERE id = ?').get(id) as BookRow | null;
 
@@ -80,14 +101,18 @@ export const getAudiobook = (id: number) => db.query(`SELECT g.*, b.title, b.aut
 export const tracksOf = (generationId: number) =>
   db.query('SELECT * FROM tracks WHERE generation_id = ? ORDER BY idx').all(generationId) as TrackRow[];
 
+// An audiobook's chapters, without their text.
+export const chaptersOf = (generationId: number) => db.query(`SELECT generation_id, idx, title, NULL AS text, status, requested_by,
+  requested_at, parts_done, parts_total, error FROM chapters WHERE generation_id = ? ORDER BY idx`).all(generationId) as ChapterRow[];
+
 // What one person has made, newest first, each with its book.
 export const generationsBy = (userId: number) => db.query(`SELECT g.*, b.title, b.author, b.cover
   FROM generations g JOIN books b ON b.id = g.book_id WHERE g.user_id = ? ORDER BY g.created_at DESC, g.id DESC`).all(userId) as AudiobookRow[];
 
-// The public, finished audiobooks, newest first, those whose title or author has `q` in it.
+// The public audiobooks with something to play (prepared, a chapter narrated), newest first, those whose title or author has `q` in it.
 export function browse(q = '', limit = 100) {
   const like = `%${q.toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   return db.query(`SELECT g.*, b.title, b.author, b.cover FROM generations g JOIN books b ON b.id = g.book_id
-    WHERE g.public = 1 AND g.status = 'ready' AND (?1 = '' OR lower(b.title) LIKE ?2 ESCAPE '\\' OR lower(b.author) LIKE ?2 ESCAPE '\\')
+    WHERE g.public = 1 AND g.status = 'ready' AND g.done > 0 AND (?1 = '' OR lower(b.title) LIKE ?2 ESCAPE '\\' OR lower(b.author) LIKE ?2 ESCAPE '\\')
     ORDER BY g.created_at DESC, g.id DESC LIMIT ?3`).all(q, like, limit) as AudiobookRow[];
 }

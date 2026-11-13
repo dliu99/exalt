@@ -3,10 +3,9 @@
   "cleanUrls": false,
   "rewrites": [
     { "source": "/home", "destination": "/shell.html" },
-    { "source": "/explore", "destination": "/shell.html" },
+    { "source": "/import", "destination": "/shell.html" },
+    { "source": "/browse", "destination": "/shell.html" },
     { "source": "/voices", "destination": "/shell.html" },
-    { "source": "/book/:id", "destination": "/shell.html" },
-    { "source": "/book/:id/create", "destination": "/shell.html" },
     { "source": "/play/:gen", "destination": "/shell.html" }
   ],
   "headers": [

@@ -68,7 +68,7 @@ test('the routes: an account is required, and the newest place wins', async () =
 
   const kept = await put(phone, gen, place);
   expect(kept.status).toBe(200);
-  expect(await kept.json()).toEqual({ gen: String(gen), book: 'OL1W', title: 'A Quiet Harbour', author: 'Test Author',
+  expect(await kept.json()).toEqual({ gen: String(gen), title: 'A Quiet Harbour', author: 'Test Author',
     cover: 'https://covers.example/1.jpg', track: 2, tracks: 10, time: 61.5, duration: 300, at, finished: false });
   // The same account on another device finds it.
   expect(await list(web).then((r) => r.json())).toMatchObject([{ gen: String(gen), track: 2, time: 61.5 }]);

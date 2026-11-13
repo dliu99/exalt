@@ -18,10 +18,10 @@ db.run(`CREATE TABLE IF NOT EXISTS places (
 
 export type Place = { track: number; tracks: number; time: number; duration: number; at: number; finished: boolean };
 export type PlaceRow = Omit<Place, 'finished'> & {
-  generation_id: number; finished: number; book_id: string; title: string; author: string; cover: string; public: number;
+  generation_id: number; finished: number; title: string; author: string; cover: string; public: number;
 };
 
-const withBook = `SELECT p.*, g.book_id, g.public, b.title, b.author, b.cover FROM places p
+const withBook = `SELECT p.*, g.public, b.title, b.author, b.cover FROM places p
   JOIN generations g ON g.id = p.generation_id JOIN books b ON b.id = g.book_id`;
 
 // One listener's places, newest first, the finished ones included (they tell a device to drop its
@@ -51,6 +51,6 @@ export function placeFrom(body: Record<string, unknown>, now = Date.now()): Plac
 
 // `cover` is the route's to sign (a private audiobook's) before it is answered.
 export const placeJson = (r: PlaceRow, cover = r.cover) => ({
-  gen: String(r.generation_id), book: r.book_id, title: r.title, author: r.author, cover,
+  gen: String(r.generation_id), title: r.title, author: r.author, cover,
   track: r.track, tracks: r.tracks, time: r.time, duration: r.duration, at: r.at, finished: r.finished === 1,
 });

@@ -40,18 +40,18 @@ export async function saveAudio(file: string, path: string): Promise<'s3' | 'loc
   renameSync(path, join(AUDIO_DIR, file));
   return 'local';
 }
+// Removes a stored chapter (a deleted audiobook's); one already gone is fine.
+export async function deleteAudio(file: string, storage: string) {
+  validateAudioFile(file);
+  if (storage === 's3') { if (s3) await s3.file(key(file)).delete().catch(() => {}); return; }
+  rmSync(join(AUDIO_DIR, file), { force: true });
+}
 export function audioURL(file: string): string {
   validateAudioFile(file);
   if (!s3) throw new Error('The audio bucket is not configured on this server.');
   return s3.presign(key(file), { expiresIn: 3600 });
 }
 
-// A chapter's stored audio, gone (a deleted audiobook's).
-export async function removeAudio(file: string, storage: string) {
-  validateAudioFile(file);
-  if (storage === 's3') { if (s3) await s3.file(key(file)).delete(); }
-  else rmSync(join(AUDIO_DIR, file), { force: true });
-}
 export const audioDir = (generationId: number) => join(AUDIO_DIR, String(generationId));
 
 // Covers: what an import's EPUB carried, kept as its book's. Only these names are served.

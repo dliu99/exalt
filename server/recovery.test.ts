@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { wav } from './tts.ts';
-import { chunks } from './parse.ts';
+import { partsOf } from './parse.ts';
 
 async function start(dir: string, extra: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, 'server/index.ts', '--offline'], {
@@ -31,13 +31,13 @@ async function finished(address: string, id: number) {
   let value;
   for (let i = 0; i < 100; i++) {
     value = await fetch(`${address}/generations/${id}`).then((r) => r.json());
-    if (value.status === 'ready' || value.status === 'failed') return value;
+    if ((value.status === 'ready' && value.active === 0) || value.status === 'failed') return value;
     await Bun.sleep(20);
   }
   throw new Error('Recovery did not finish.');
 }
 
-test('restart resumes the durable queue, keeps completed chapters and deletes temporary text', async () => {
+test('a whole-book job from before chapters were asked for one at a time keeps its chapters and narrates the next', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'exalt-recovery-'));
   let server: Awaited<ReturnType<typeof start>> | undefined;
   try {
@@ -50,11 +50,24 @@ test('restart resumes the durable queue, keeps completed chapters and deletes te
     const old = Number(db.query("INSERT INTO generations (book_id,made_by,model,voice,source_name,status,created_at) VALUES ('OL1W','test','exalt/silence','','old.txt','ready',0)").run().lastInsertRowid);
     await Bun.write(join(dir, 'audio', String(old), '0.mp3'), new Uint8Array([0x49, 0x44, 0x33, 4]));
     db.query("INSERT INTO tracks (generation_id,idx,title,file,bytes,storage) VALUES (?,0,'Old chapter',?,4,'local')").run(old, `${old}/0.mp3`);
+    // One that failed after two of its four chapters: its text is gone, so the others can't be narrated.
+    const failed = Number(db.query("INSERT INTO generations (book_id,made_by,model,voice,source_name,status,done,total,error,created_at) VALUES ('OL1W','test','exalt/silence','','f.txt','failed',2,4,'It broke.',0)").run().lastInsertRowid);
+    for (const i of [0, 1]) {
+      await Bun.write(join(dir, 'audio', String(failed), `${i}.mp3`), new Uint8Array([0x49, 0x44, 0x33, 4]));
+      db.query("INSERT INTO tracks (generation_id,idx,title,file,bytes,storage) VALUES (?,?,?,?,4,'local')").run(failed, i, `Part ${i + 1}`, `${failed}/${i}.mp3`);
+    }
     db.close();
     server = await start(dir);
     const gen = await finished(server.address, id);
     expect(gen.status).toBe('ready'); expect(gen.done).toBe(2);
     expect(gen.tracks[0].title).toBe('Kept chapter');
+    expect(gen.chapters.map((c: { title: string; status: string }) => [c.title, c.status])).toEqual([['Kept chapter', 'ready'], ['Chapter 2', 'ready']]);
+    const older = await finished(server.address, old);
+    expect(older.chapters.map((c: { status: string }) => c.status)).toEqual(['ready']);
+    const broken = await finished(server.address, failed);
+    expect([broken.status, broken.done, broken.total]).toEqual(['ready', 2, 4]);
+    expect(broken.chapters.map((c: { title: string; status: string }) => [c.title, c.status]))
+      .toEqual([['Part 1', 'ready'], ['Part 2', 'ready'], ['Chapter 3', 'unavailable'], ['Chapter 4', 'unavailable']]);
     expect(new Uint8Array(await Bun.file(join(dir, 'audio', String(id), '0.wav')).arrayBuffer())).toEqual(first);
     const check = new Database(join(dir, 'db.sqlite'));
     expect(check.query('SELECT COUNT(*) AS n FROM generation_jobs').get()).toEqual({ n: 0 });
@@ -63,13 +76,13 @@ test('restart resumes the durable queue, keeps completed chapters and deletes te
     const kept = await fetch(`${server.address}${gen.tracks[0].src}`);
     expect(kept.headers.get('content-type')).toBe('audio/wav');
     expect(new Uint8Array(await kept.arrayBuffer())).toEqual(first);
-    const older = await fetch(`${server.address}/audio/${old}/0.mp3`);
-    expect(older.headers.get('content-type')).toBe('audio/mpeg');
-    expect((await older.arrayBuffer()).byteLength).toBe(4);
+    const oldAudio = await fetch(`${server.address}/audio/${old}/0.mp3`);
+    expect(oldAudio.headers.get('content-type')).toBe('audio/mpeg');
+    expect((await oldAudio.arrayBuffer()).byteLength).toBe(4);
     // The second chapter crosses TTS chunk boundaries: every chunk's second of PCM is in its M4A.
     expect(gen.tracks[1].src).toBe(`/audio/${id}/1.m4a`);
     const second = join(dir, 'audio', String(id), '1.m4a');
-    const parts = chunks(`${chapter(2).title}. ${chapter(2).text}`).length;
+    const parts = partsOf(chapter(2).title, chapter(2).text).length;
     expect(parts).toBeGreaterThan(1);
     const seconds = Number(Bun.spawnSync(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', second]).stdout.toString());
     expect(Math.abs(seconds - parts)).toBeLessThan(0.1);

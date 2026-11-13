@@ -120,3 +120,271 @@ test "voices lists Fish Audio's, and choosing one makes it yours"
   tap "nav-home"
   clock data
   expect tree has "home"
+
+test "the import sheet takes a pasted link instead of a file"
+  clock data
+  tap "enter"
+  clock data
+  tap "import"
+  clock data
+  clock settle
+  expect tree has "link"
+  expect text "book-note" == "An EPUB, PDF or TXT of your own: choose the file, or paste a link to it."
+  type "link" "http://books.example/a-quiet-harbour.txt"
+  expect state linkOk == false
+  type "link" "https://books.example/a-quiet-harbour.txt"
+  expect state linkOk == true
+  expect state link == "https://books.example/a-quiet-harbour.txt"
+  expect text "book-note" == "Exalt downloads the file at this link (HTTPS, under 50 MB) and splits it into chapters."
+  expect text "file-name" == "Choose…"
+  expect text "import-hint" == "Sign in to narrate."
+  expect disabled "narrate"
+
+// From here on the run's shared database has ada's shared import of the offline server's sample
+// link (three chapters, the first narrated at import): audiobook 1. Importing it again is hers.
+test "a shared audiobook lists its chapters: the first narrated, the others waiting for Generate"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  clock data
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock +100
+  clock data
+  expect tree has "shared-1"
+  tap "shared-1"
+  clock data
+  expect text "now-playing" == "Chapter One: The Harbour"
+  expect tree has "toggle"
+  expect tree missing "generate-0"
+  expect tree has "generate-1"
+  expect tree has "generate-2"
+  expect tree missing "delete"
+  expect tree missing "in-progress"
+
+test "signed out, a chapter's Generate opens the sheet, and closing it carries nothing on"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  expect state pendingAuth == ""
+  tap "generate-2"
+  expect tree has "account-sheet"
+  expect state pendingAuth == "chapter"
+  expect state pendingChapter == 2
+  back
+  clock settle
+  expect state pendingAuth == ""
+  expect tree has "player"
+
+test "the player's speed, pause, position and skips"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  expect state duration == 1
+  expect state rate == 1
+  tap "rate"
+  expect state rate == 1.25
+  expect text "rate" == "1.25×"
+  tap "rate"
+  tap "rate"
+  expect state rate == 2
+  tap "rate"
+  expect state rate == 0.75
+  expect state held == false
+  tap "toggle"
+  expect state held == true
+  type "scrub" "1"
+  expect state now == 1
+  expect text "elapsed" == "0:01"
+  tap "back15"
+  expect state now == 0
+  expect text "elapsed" == "0:00"
+  // +30 never runs past the chapter: it stops a second short of its end.
+  tap "fwd30"
+  expect state now == 0
+
+test "at a chapter that isn't narrated the player stops and offers Generate, and plays it once someone has"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  tap "audio" mediasession "nexttrack"
+  expect text "now-playing" == "Chapter Two: The River"
+  expect state held == true
+  expect tree has "not-narrated"
+  expect tree has "generate-current"
+  expect tree missing "audio"
+  request POST "/generations/1/chapters/1" as grace
+  clock +1500 real
+  clock +3000
+  clock data
+  expect tree missing "not-narrated"
+  expect tree has "audio"
+  expect tree has "toggle"
+  expect tree missing "generate-1"
+
+// The player is at App level: leaving it keeps the chapter playing, in the dock's mini player.
+// (The test chapters are a second of silence each, played in real time: what's checked after
+// the first steps is checked paused.)
+test "leaving the player keeps it playing, in the dock's mini player, which pauses and opens it"
+  size 390x844
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  tap "player-back"
+  clock settle
+  expect tree has "browse"
+  expect state held == false
+  expect tree has "audio"
+  expect tree has "mini-player"
+  expect tree has "nav-home"
+  tap "mini-toggle"
+  expect state held == true
+  expect tree has "audio"
+  expect state loaded == "1"
+  expect text "mini-book" == "A Quiet Harbour"
+  // The lock screen's controls are still the player's: its title, and skips back and ahead.
+  expect mediasession owner == "audio"
+  expect mediasession album == "A Quiet Harbour"
+  expect mediasession has "seekbackward"
+  expect mediasession has "seekforward"
+  expect mediasession has "nexttrack"
+  tap "nav-home"
+  clock data
+  clock settle
+  expect tree has "home"
+  expect tree has "mini-player"
+  expect tree missing "mini"
+  tap "mini-open"
+  clock settle
+  expect tree has "player"
+  expect tree missing "mini-player"
+  expect state loaded == "1"
+  expect tree has "toggle"
+
+test "a narrated chapter in the list plays at a tap; one that isn't keeps its Generate"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  expect text "now-playing" == "Chapter One: The Harbour"
+  tap "track-1"
+  expect state track == 1
+  expect state held == false
+  expect text "now-playing" == "Chapter Two: The River"
+  expect tree has "audio"
+  tap "track-0"
+  expect state track == 0
+  expect text "now-playing" == "Chapter One: The Harbour"
+  expect tree has "generate-2"
+  expect tree missing "generate-1"
+
+test "the sleep timer counts while playing, holds with a pause, and pauses at its time or the chapter's end"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  tap "toggle"
+  expect state held == true
+  expect tree missing "sleep-left"
+  tap "sleep"
+  tap "sleep-15"
+  expect state sleepMins == 15
+  expect text "sleep-left" == "Pausing in 15:00"
+  clock +60000
+  expect text "sleep-left" == "Pausing in 15:00"
+  // End of chapter: the chapter's end pauses at the start of the next, where it would have played on.
+  tap "sleep"
+  tap "sleep-chapter"
+  expect text "sleep-left" == "Pausing at the end of this chapter"
+  tap "toggle"
+  clock +1500 real
+  expect state track == 1
+  expect state held == true
+  expect state sleepMins == 0
+  expect tree missing "sleep-left"
+  // Minutes: once they've passed it pauses, and turns itself off. (A little over: a chapter's
+  // change, a pause and then the next, holds the count for a moment.)
+  tap "sleep"
+  tap "sleep-15"
+  tap "toggle"
+  clock +930000
+  expect state held == true
+  expect state sleepMins == 0
+  expect state sleepLeft == 0
+  expect tree missing "sleep-left"
+
+// It narrates the third chapter, which the tests above keep waiting for Generate: after them.
+test "an audiobook downloads to the device, plays from there, and is removed again"
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock data
+  tap "shared-1"
+  clock data
+  expect text "download-state" == "Listen offline"
+  expect tree missing "remove-download"
+  // A dropped connection keeps nothing, and says so.
+  fail fetch "http://127.0.0.1:8787/audio" times 1
+  tap "download"
+  clock data
+  expect text "download-error" == "The download stopped. Check the connection, then try again."
+  expect text "download-state" == "Listen offline"
+  tap "download"
+  clock data
+  expect tree missing "download-error"
+  expect text "download-state" == "Downloaded"
+  expect tree has "remove-download"
+  expect tree missing "download"
+  expect tree has "chapter-kept-0"
+  expect tree has "chapter-kept-1"
+  expect state playSrc == "app:/cache/offline/1/0.m4a"
+  // A chapter narrated since is offered as the rest.
+  request POST "/generations/1/chapters/2" as grace
+  clock +1500 real
+  // Reopened at the player's address, it loads the audiobook there, paused.
+  reload
+  clock +100
+  clock data
+  expect tree has "player"
+  expect state loaded == "1"
+  expect state held == true
+  expect text "download-state" == "2 of 3 chapters downloaded"
+  expect text "download" == "Download the rest"
+  tap "remove-download"
+  clock data
+  expect text "download-state" == "Listen offline"
+  expect tree has "download"
+  expect tree missing "chapter-kept-0"
+  expect state keptSrc == ""
+
+// Last: it adds an audiobook to the run's shared database.
+test "a book imported by link is split into chapters and shared; a link to a private address is refused"
+  request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2F127.0.0.1%2Fbook.epub" as ada expect 400
+  request POST "/audiobooks?model=exalt%2Fsilence&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace expect 400
+  request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace
+  clock +1500 real
+  tap "enter"
+  clock data
+  tap "nav-browse"
+  clock +100
+  clock data
+  // ada's audiobook 1, and grace's own of the same link; nothing was made of the refused ones.
+  expect tree has "shared-1"
+  expect tree has "shared-2"
+  expect tree missing "shared-3"
