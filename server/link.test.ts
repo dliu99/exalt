@@ -102,7 +102,7 @@ test('the route checks a link before reserving anything, and imports the offline
     const reader = child.stdout.getReader();
     const { value } = await reader.read(); reader.releaseLock();
     const address = new TextDecoder().decode(value).match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-    const make = (link: string, extra = '') => fetch(`${address}/books/OL2W/generations?model=exalt%2Fsilence&rights=1&link=${encodeURIComponent(link)}${extra}`, { method: 'POST', headers: { authorization: 'Bearer ada' } });
+    const make = (link: string, extra = '') => fetch(`${address}/audiobooks?model=exalt%2Fsilence&rights=1&link=${encodeURIComponent(link)}${extra}`, { method: 'POST', headers: { authorization: 'Bearer ada' } });
     for (const [link, error] of [['http://books.example/a.txt', 'Only https://'], ['https://127.0.0.1/a.epub', 'private or local'], ['https://localhost/a.epub', 'private or local'],
       ['https://[::1]:443/a.pdf', 'private or local'], ['https://169.254.169.254/latest/meta-data/', 'private or local'],
       ['https://books.example/other.epub', 'only its sample link']]) {
@@ -110,7 +110,9 @@ test('the route checks a link before reserving anything, and imports the offline
       expect([link, res.status]).toEqual([link, 400]);
       expect((await res.json()).error).toContain(error);
     }
-    expect((await make('https://books.example/a-quiet-harbour.txt', '&source=lg-00000000000000000000000000000001')).status).toBe(400);
+    // Sharing it needs the rights confirmed, as an upload does.
+    const unconfirmed = await fetch(`${address}/audiobooks?model=exalt%2Fsilence&link=${encodeURIComponent('https://books.example/a-quiet-harbour.txt')}`, { method: 'POST', headers: { authorization: 'Bearer ada' } });
+    expect([unconfirmed.status, (await unconfirmed.json()).error]).toEqual([400, 'Confirm you may share this book publicly.']);
     // Refused links leave nothing behind.
     const db = new Database(join(dir, 'db.sqlite'));
     expect(db.query('SELECT COUNT(*) AS n FROM generations').get()).toEqual({ n: 0 });

@@ -18,15 +18,16 @@ db.run(`CREATE TABLE IF NOT EXISTS places (
 
 export type Place = { track: number; tracks: number; time: number; duration: number; at: number; finished: boolean };
 export type PlaceRow = Omit<Place, 'finished'> & {
-  generation_id: number; finished: number; book_id: string; title: string; author: string; cover: string;
+  generation_id: number; finished: number; title: string; author: string; cover: string; public: number;
 };
 
-const withBook = `SELECT p.*, g.book_id, b.title, b.author, b.cover FROM places p
+const withBook = `SELECT p.*, g.public, b.title, b.author, b.cover FROM places p
   JOIN generations g ON g.id = p.generation_id JOIN books b ON b.id = g.book_id`;
 
-// One listener's places, newest first, the finished ones included (they tell a device to drop its own).
+// One listener's places, newest first, the finished ones included (they tell a device to drop its
+// own); an audiobook its maker has since made private is left out, unless the listener is its maker.
 export const placesOf = (userId: number) =>
-  db.query(`${withBook} WHERE p.user_id = ? ORDER BY p.at DESC LIMIT 50`).all(userId) as PlaceRow[];
+  db.query(`${withBook} WHERE p.user_id = ?1 AND (g.public = 1 OR g.user_id = ?1) ORDER BY p.at DESC LIMIT 50`).all(userId) as PlaceRow[];
 
 // Keeps a place unless the one already kept is newer, and answers whichever is kept.
 export function keepPlace(userId: number, generationId: number, p: Place) {
@@ -48,7 +49,8 @@ export function placeFrom(body: Record<string, unknown>, now = Date.now()): Plac
   return { track, tracks, time, duration, at: Math.min(Math.round(at), now), finished: body.finished === true };
 }
 
-export const placeJson = (r: PlaceRow) => ({
-  gen: String(r.generation_id), book: r.book_id, title: r.title, author: r.author, cover: r.cover,
+// `cover` is the route's to sign (a private audiobook's) before it is answered.
+export const placeJson = (r: PlaceRow, cover = r.cover) => ({
+  gen: String(r.generation_id), title: r.title, author: r.author, cover,
   track: r.track, tracks: r.tracks, time: r.time, duration: r.duration, at: r.at, finished: r.finished === 1,
 });

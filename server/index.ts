@@ -1,34 +1,36 @@
-// Exalt's server: the shared catalog, uploads, and the audiobooks made from them.
-// `bun server/index.ts` for development; `--offline` (what tests run) answers search from a
-// fixture and voices with silence, so nothing reaches the network.
-import { createHash } from 'node:crypto';
+// Exalt's server: a signed-in person imports their own EPUB, PDF or TXT, the server narrates it,
+// and the audiobook joins their library, shared in the public Browse feed unless they keep it
+// private. The file comes as the request body, or from a link the person pastes (link.ts). Its
+// first chapter is narrated as it is imported; the others when someone asks (Generate) or as a
+// listener nears them, and a chapter plays while it is still being narrated (live.ts).
+// `bun server/index.ts` for development; `--offline` (what tests run) voices with silence and
+// imports only its sample link, so nothing reaches the network.
+import { createHash, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { join as pathJoin, normalize } from 'node:path';
 import { API, CLIENTS } from './config.ts';
 import { auth, type Provider, type User } from './auth.ts';
-import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
-import { booksWithAudio, chaptersOf, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
-import { AUDIO_DIR, activeFor, enqueue, failJob, MAX_ACTIVE, narrateAhead, OFFLINE_BOOK, prepared, QueueFull, Refused, removeGeneration, requestChapter, reserve } from './jobs.ts';
+import { browse, chaptersOf, db, generationsBy, getAudiobook, getBook, getGeneration, tracksOf, type AudiobookRow } from './db.ts';
+import { AUDIO_DIR, activeFor, MAX_ACTIVE, narrateAhead, OFFLINE_BOOK, prepared, QueueFull, Refused, removeAudiobook, requestChapter, reserve } from './jobs.ts';
 import { checkedAddresses, fetchLink, LinkRefused, linkURL } from './link.ts';
 import { liveFile, liveOf } from './live.ts';
-import { parseBook } from './parse.ts';
+import { bookMeta, parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
-import { lg } from './libgen.ts';
-import { audioType, audioURL, validateAudioFile } from './storage.ts';
-import { zlib } from './zlibrary.ts';
+import { audioType, audioURL, coverPath, coverType, coverURL, saveCover, validateAudioFile, validateCoverFile } from './storage.ts';
 import { listVoices } from './fish.ts';
-import { keepPlace, placeFrom, placeJson, placesOf } from './places.ts';
+import { keepPlace, placeFrom, placeJson, placesOf, type PlaceRow } from './places.ts';
+import { sign, signed } from './signing.ts';
 
 let uploading = 0;
 const OFFLINE = process.argv.includes('--offline');
 // The one link the offline server imports (its sample book), so tests can import by link with no network.
 const OFFLINE_LINK = 'https://books.example/a-quiet-harbour.txt';
-consolidate();
-const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST, DELETE', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
+const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
 const preflight = () => new Response(null, { status: 204, headers: CORS });
 const fail = (e: unknown, status = 502) => send({ error: String((e as Error).message ?? e) }, status);
 const json = (req: Request) => req.json().catch(() => ({})) as Promise<Record<string, any>>;
+const RIGHTS = 'Confirm you may share this book publicly.';
 
 // Accounts (auth.ts). Under --offline with SIGN_IN_TEST_KEYS, exact's fixture provider stands in
 // for Apple and Google, so tests and drives sign in with no network.
@@ -42,7 +44,6 @@ const accounts = auth({
   googleSecret: process.env.GOOGLE_CLIENT_SECRET,
   ...(idp ? { keys: async (_p: Provider) => (await idp.jwks(testKeys)).keys, exchange: (code: string) => idp.exchange(testKeys, code) } : {}),
 });
-const signInRequired = (what = 'make an audiobook') => send({ error: `Sign in to ${what}.` }, 401);
 // Under --offline the test driver writes as a persona (`request … as ada`): its bearer token is the
 // persona's name, standing for an account of its own. Nothing but the offline server takes one.
 function persona(req: Request): User | null {
@@ -52,35 +53,56 @@ function persona(req: Request): User | null {
   return db.query("SELECT * FROM users WHERE provider = 'google' AND sub = ?").get(`persona:${name}`) as User;
 }
 const userOf = (req: Request) => accounts.user(req) ?? (OFFLINE ? persona(req) : null);
+const signedOut = () => send({ error: 'Not signed in.' }, 401);
+const noSuch = () => send({ error: 'No such audiobook.' }, 404);
 
 const back = (r: { status: number; location?: string; body?: string }) =>
   r.location ? new Response(null, { status: r.status, headers: { location: r.location } }) : new Response(r.body ?? '', { status: r.status });
-const bookJson = (b: BookRow, versions: number) => ({ id: b.id, title: b.title, author: b.author, year: b.year, cover: b.cover, description: b.description, versions });
-// A version: `status` is its preparation's (queued, working, ready, failed); `done` of `total`
-// chapters are narrated, and `active` are waiting or narrating.
-const versionJson = (g: GenerationRow) => {
-  const first = tracksOf(g.id)[0];
-  const active = (db.query("SELECT COUNT(*) AS n FROM chapters WHERE generation_id = ? AND status IN ('queued', 'working')").get(g.id) as { n: number }).n;
-  return { id: String(g.id), by: g.made_by, model: g.model, voice: g.voice, status: g.status, done: g.done, total: g.total, active, error: g.error,
-    sample: first ? `/audio/${first.file}` : '', voiceName: g.voice_name ?? '' };
-};
-// A version's chapters: each narrated one's audio, and how far a narrating one has got. A chapter
-// still narrating has audio once its first part is narrated, at the address its M4A will have
-// (live.ts), so it plays while the rest is narrated.
-const chaptersJson = (g: GenerationRow) => {
+
+// A private audiobook's cover and audio go out signed (signing.ts); a public one's as they are.
+const coverOf = (g: { cover: string; public: number }) => (g.public ? g.cover : sign(g.cover));
+const audioSrc = (g: { public: number }, file: string) => (g.public ? `/audio/${file}` : sign(`/audio/${file}`));
+const voiceOf = (g: AudiobookRow) => g.voice_name || g.model;
+// How many of an audiobook's chapters are waiting or narrating.
+const activeOf = (id: number) => (db.query("SELECT COUNT(*) AS n FROM chapters WHERE generation_id = ? AND status IN ('queued', 'working')").get(id) as { n: number }).n;
+// `status` is the import's (queued, working, ready, failed); `done` of `total` chapters are
+// narrated, and `active` are waiting or narrating.
+const mineJson = (g: AudiobookRow) => ({ id: String(g.id), title: g.title, author: g.author, cover: coverOf(g), status: g.status,
+  done: g.done, total: g.total, active: activeOf(g.id), error: g.error, public: g.public === 1, voice: voiceOf(g), created: g.created_at });
+// An audiobook's chapters: each narrated one's audio, and how far a narrating one has got. A
+// chapter still narrating has audio once its first part is narrated, at the address its M4A will
+// have (live.ts), so it plays while the rest is narrated. A private one's addresses are signed.
+const chaptersJson = (g: AudiobookRow) => {
   const files = new Map(tracksOf(g.id).map((t) => [t.idx, t.file]));
-  const src = (idx: number) => files.has(idx) ? `/audio/${files.get(idx)}` : liveOf(g.id, idx) ? `/audio/${liveFile(g.id, idx)}` : '';
+  const src = (idx: number) => files.has(idx) ? audioSrc(g, files.get(idx)!) : liveOf(g.id, idx) ? audioSrc(g, liveFile(g.id, idx)) : '';
   return chaptersOf(g.id).map((c) => ({ idx: c.idx, title: c.title, status: c.status, error: c.error,
     src: src(c.idx), progress: c.parts_total ? c.parts_done / c.parts_total : 0 }));
 };
+const placeOut = (r: PlaceRow) => placeJson(r, coverOf(r));
+// The person's own audiobook, or null (someone else's answers the same as none).
+const owned = (req: Request & { params: Record<string, string> }) => {
+  const me = userOf(req), id = Number(req.params.id);
+  const g = me && Number.isSafeInteger(id) ? getAudiobook(id) : null;
+  return { me, g: g && g.user_id === me!.id ? g : null };
+};
+// An audiobook this request may see: a shared one, or the signed-in person's own private one.
+const visible = (req: Request, id: number) => {
+  const g = Number.isSafeInteger(id) ? getAudiobook(id) : null;
+  return g && (g.public || (g.user_id && userOf(req)?.id === g.user_id)) ? g : null;
+};
+const newBookId = () => `up-${randomBytes(8).toString('hex')}`;
 
 // Locally the server listens where the app looks for it (API_BASE_URL); a host such as Render
 // says where instead (HOST, PORT), the public address being its proxy's.
 const listen = new URL(API);
 const hostname = process.env.HOST ?? listen.hostname, port = Number(process.env.PORT ?? listen.port);
+const DEV_SIGN_IN = process.env.DEV_SIGN_IN === '1' && /^(127\.0\.0\.1|localhost|::1)$/.test(hostname);
+if (process.env.DEV_SIGN_IN === '1' && !DEV_SIGN_IN) console.warn('DEV_SIGN_IN ignored: the server is not on a loopback address.');
 const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024, routes: {
   '/health': () => new Response('ok'),
 
+  // Skipping sign-in while developing: DEV_SIGN_IN=1 on a server listening on loopback only; otherwise no such route.
+  '/sign-in/dev': { OPTIONS: preflight, POST: () => (DEV_SIGN_IN ? send(accounts.dev()) : send({ error: 'Not found.' }, 404)) },
   '/sign-in/nonce': { OPTIONS: preflight, POST: async (req) => send(accounts.nonce(await json(req))) },
   '/sign-in/identity': { OPTIONS: preflight, POST: async (req) => {
     try { return send(await accounts.identity(await json(req))); } catch (e) { return fail(e); }
@@ -100,50 +122,79 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   '/door': { OPTIONS: preflight, GET: () => send({ required: !OFFLINE }) },
   '/me': { OPTIONS: preflight, GET: (req) => {
     const me = accounts.user(req);
-    return me ? send({ name: me.name, email: me.email }) : send({ error: 'Not signed in.' }, 401);
+    return me ? send({ name: me.name, email: me.email }) : signedOut();
   } },
-  // The audiobooks the signed-in person has made, with their books.
+  '/sign-out': { OPTIONS: preflight, POST: (req) => { accounts.signOut(req); return send({ ok: true }); } },
+
+  // The signed-in person's library: everything they have imported, finished or not.
   '/me/audiobooks': { OPTIONS: preflight, GET: (req) => {
     const me = userOf(req);
-    if (!me) return send({ error: 'Not signed in.' }, 401);
-    return send(generationsBy(me.id).map((g) => ({ ...versionJson(g), book: g.book_id, title: g.title, author: g.author, cover: g.cover })));
+    return me ? send(generationsBy(me.id).map(mineJson)) : signedOut();
   } },
+  // Share or unshare one, or correct its title and author.
+  '/me/audiobooks/:id': { OPTIONS: preflight,
+    PATCH: async (req) => {
+      const { me, g } = owned(req);
+      if (!me) return signedOut();
+      if (!g) return noSuch();
+      const body = await json(req);
+      if ('public' in body && typeof body.public !== 'boolean') return send({ error: 'Say whether to share this audiobook.' }, 400);
+      if (body.public === true && !g.public && body.rights !== true) return send({ error: RIGHTS }, 400);
+      const title = typeof body.title === 'string' ? body.title.trim() : undefined;
+      const author = typeof body.author === 'string' ? body.author.trim() : undefined;
+      if (title !== undefined && !title) return send({ error: 'Give the audiobook a title.' }, 400);
+      if ((title?.length ?? 0) > 200 || (author?.length ?? 0) > 200) return send({ error: 'Titles and authors are at most 200 characters.' }, 400);
+      db.transaction(() => {
+        if (typeof body.public === 'boolean') db.query('UPDATE generations SET public = ? WHERE id = ?').run(body.public ? 1 : 0, g.id);
+        if (title === undefined && author === undefined) return;
+        // A book an older audiobook shares (the retired catalog's) is copied first, so only this one changes.
+        let bookId = g.book_id;
+        if (db.query('SELECT 1 FROM generations WHERE book_id = ? AND id != ? LIMIT 1').get(bookId, g.id)) {
+          const book = getBook(bookId)!;
+          bookId = newBookId();
+          db.query('INSERT INTO books (id, title, author, year, cover, description) VALUES (?, ?, ?, ?, ?, ?)').run(bookId, book.title, book.author, book.year, book.cover, book.description);
+          db.query('UPDATE generations SET book_id = ? WHERE id = ?').run(bookId, g.id);
+        }
+        if (title !== undefined) db.query('UPDATE books SET title = ? WHERE id = ?').run(title, bookId);
+        if (author !== undefined) db.query('UPDATE books SET author = ? WHERE id = ?').run(author, bookId);
+      })();
+      return send(mineJson(getAudiobook(g.id)!));
+    },
+    // Gone for good, even mid-narration: the worker stops at its next chunk (jobs.ts).
+    DELETE: async (req) => {
+      const { me, g } = owned(req);
+      if (!me) return signedOut();
+      if (!g) return noSuch();
+      await removeAudiobook(g.id);
+      return send({ ok: true });
+    },
+  },
   // Where the signed-in person is in each audiobook (places.ts), so their devices carry over.
   '/me/places': { OPTIONS: preflight, GET: (req) => {
     const me = accounts.user(req);
-    if (!me) return send({ error: 'Not signed in.' }, 401);
-    return send(placesOf(me.id).map(placeJson));
+    return me ? send(placesOf(me.id).map(placeOut)) : signedOut();
   } },
   // One place, kept unless the server already has a newer one; answers whichever it keeps.
-  '/me/places/:gen': { OPTIONS: () => new Response(null, { status: 204, headers: { ...CORS, 'access-control-allow-methods': 'PUT' } }), PUT: async (req) => {
-    const me = accounts.user(req);
-    if (!me) return send({ error: 'Not signed in.' }, 401);
+  '/me/places/:gen': { OPTIONS: preflight, PUT: async (req) => {
+    const me = userOf(req);
+    if (!me) return signedOut();
     const gen = Number(req.params.gen);
-    if (!Number.isSafeInteger(gen) || !getGeneration(gen)) return send({ error: 'No such audiobook.' }, 404);
+    const g = Number.isSafeInteger(gen) ? getGeneration(gen) : null;
+    if (!g || (!g.public && g.user_id !== me.id)) return noSuch();
     const place = placeFrom(await json(req));
     if (!place) return send({ error: 'Not a place in this audiobook.' }, 400);
     const kept = keepPlace(me.id, gen, place);
     // Where they are, the next chapter is narrated ahead of them (within their limit; jobs.ts).
     if (!kept.finished) narrateAhead(gen, kept.track + 1, me.id);
-    return send(placeJson(kept));
-  } },
-  '/sign-out': { OPTIONS: preflight, POST: (req) => { accounts.signOut(req); return send({ ok: true }); } },
-
-  '/search': { OPTIONS: preflight, GET: async (req) => {
-    const params = new URL(req.url).searchParams;
-    const q = params.get('q')?.trim() ?? '', provider = params.get('provider') ?? providerName;
-    // Suggestions under the field ask for a few (`limit`); the results page for all.
-    const limit = Math.min(25, Math.max(1, Number(params.get('limit')) || 25));
-    if (!q) return send([]);
-    if (!isProvider(provider)) return send({ error: `No book provider called ${provider}.` }, 400);
-    try {
-      const found = await search(q, OFFLINE, provider);
-      const counts = readyCounts(found.map((b) => b.id));
-      return send(found.slice(0, limit).map((b) => bookJson(b, counts.get(b.id) ?? 0)));
-    } catch (e) { return fail(e); }
+    return send(placeOut(kept));
   } },
 
-  '/listening': { OPTIONS: preflight, GET: () => send(booksWithAudio().map((b) => bookJson(b, b.versions))) },
+  // Everyone's shared, finished audiobooks, newest first; `q` narrows to a title or author.
+  '/browse': { OPTIONS: preflight, GET: (req) => {
+    const q = (new URL(req.url).searchParams.get('q') ?? '').trim().slice(0, 200);
+    return send(browse(q).map((g) => ({ id: String(g.id), title: g.title, author: g.author, cover: g.cover, by: g.made_by,
+      voice: voiceOf(g), chapters: g.total, done: g.done, created: g.created_at })));
+  } },
 
   '/models': { OPTIONS: preflight, GET: async () => {
     try { return send(await listModels(OFFLINE)); } catch (e) { return fail(e); }
@@ -154,62 +205,25 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     try { return send(await listVoices(new URL(req.url).searchParams.get('q') ?? '', OFFLINE)); } catch (e) { return fail(e); }
   } },
 
-  '/books/:id': { OPTIONS: preflight, GET: async (req) => {
-    try {
-      const book = await ensureBook(req.params.id, OFFLINE);
-      if (!book) return send({ error: 'No such book.' }, 404);
-      const versions = generationsOf(book.id);
-      // Asked for under an edition's id, the page keeps that id; everything it shows is the book's.
-      return send({ book: { ...bookJson(book, versions.filter((v) => v.status === 'ready' && v.done > 0).length), id: req.params.id }, versions: versions.map(versionJson) });
-    } catch (e) { return fail(e); }
-  } },
-
-  '/books/:id/sources': { OPTIONS: preflight, GET: async (req) => {
-    try {
-      const book = await ensureBook(req.params.id, OFFLINE);
-      if (!book) return send({ error: 'No such book.' }, 404);
-      if (OFFLINE) return send({ available: true, files: book.id === 'OL1W' ? [{ id: 'lg-00000000000000000000000000000001', label: 'LibGen · A Quiet Harbour · EPUB · English' }] : [] });
-      const providers = [
-        ...(lg.enabled ? [{ name: 'LibGen', api: lg, owns: /^lg-[a-f0-9]{32}$/ }] : []),
-        ...(zlib.configured ? [{ name: 'Z-Library', api: zlib, owns: /^zl-\d+-[a-zA-Z0-9]+$/ }] : []),
-      ];
-      if (!providers.length) return send({ available: false, files: [] });
-      const results = await Promise.allSettled(providers.map(async (p) => {
-        const [matches, selected] = await Promise.all([
-          p.api.search(`${book.title} ${book.author}`),
-          p.owns.test(req.params.id) ? p.api.book(req.params.id) : Promise.resolve(null),
-        ]);
-        return [...new Map([...(selected ? [selected] : []), ...matches].map((f) => [f.id, f])).values()]
-          .map((f) => ({ ...f, title: `${p.name} · ${f.title}` }));
-      }));
-      if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
-      const files = results.flatMap((r) => r.status === 'fulfilled' ? r.value : [])
-        .sort((a, b) => Number(b.extension === 'epub') - Number(a.extension === 'epub'));
-      return send({ available: true, files: files.map((f) => ({ id: f.id, label: [f.title, f.author, f.extension.toUpperCase(), f.language, f.size].filter(Boolean).join(' · ') })) });
-    } catch (e) { return fail(e); }
-  } },
-
-  // Making an audiobook prepares it: the upload (the request body), the download (`source`) or the
-  // file at a pasted link (`link`, link.ts) is split into chapters, and its first is narrated; the
-  // rest wait to be asked for. What to make of it is in the query.
-  '/books/:id/generations': { OPTIONS: preflight, POST: async (req) => {
+  // An import: the file is the request body, or the file at a pasted link (`link`, link.ts); what
+  // to make of it is in the query. Each import is its own book, titled from the EPUB's metadata or
+  // the file's name unless the query names it. It is split into chapters and its first is
+  // narrated; the rest wait to be asked for. Sharing it (`public`, on unless `public=0`) needs
+  // the rights confirmed (`rights=1`). A link the person already imported with the same voice
+  // answers with that audiobook (200, `reused`).
+  '/audiobooks': { OPTIONS: preflight, POST: async (req) => {
     const me = userOf(req);
-    if (!me) return signInRequired();
+    if (!me) return send({ error: 'Sign in to make an audiobook.' }, 401);
     const q = new URL(req.url).searchParams;
-    let name = q.get('name') ?? '';
-    const source = q.get('source') ?? '', link = q.get('link') ?? '';
-    if (source || link) server.timeout(req, 180);
+    let name = (q.get('name') ?? '').trim();
+    const link = (q.get('link') ?? '').trim();
+    if (link) server.timeout(req, 180);
     const model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
     const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
-    if (q.get('rights') !== '1') return send({ error: 'Confirm you have the right to share an audiobook of this file.' }, 400);
+    const isPublic = q.get('public') !== '0';
+    if (isPublic && q.get('rights') !== '1') return send({ error: RIGHTS }, 400);
     if (!model) return send({ error: 'Choose a voice model.' }, 400);
     if (model.length > 120 || voice.length > 200 || !(await listModels(OFFLINE)).some((m) => m.id === model)) return send({ error: 'Choose one of the available voice models.' }, 400);
-    const book = await ensureBook(req.params.id, OFFLINE).catch(() => null);
-    if (!book) return send({ error: 'No such book.' }, 404);
-    if (source && !/^lg-[a-f0-9]{32}$/.test(source) && !/^zl-\d+-[a-zA-Z0-9]+$/.test(source)) return send({ error: 'Invalid book source.' }, 400);
-    if (!OFFLINE && ((source.startsWith('lg-') && !lg.enabled) || (source.startsWith('zl-') && !zlib.configured))) return send({ error: 'This book source is not connected.' }, 400);
-    if (OFFLINE && source && (source !== 'lg-00000000000000000000000000000001' || book.id !== 'OL1W')) return send({ error: 'No such source.' }, 400);
-    if (source && link) return send({ error: 'Choose a download or a link, not both.' }, 400);
     // A link is checked before anything is reserved: its scheme, and that its host is public.
     // What is kept of it is its hash, which finds an audiobook already made from it.
     let url: URL | undefined;
@@ -225,98 +239,116 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
         } else await checkedAddresses(url);
       } catch (e) { return fail(e, 400); }
     }
-    const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : source;
-    let admitted;
+    const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : '';
+    const bookId = newBookId();
+    let admitted: { id: number; reused: boolean } | undefined;
     try {
-      admitted = reserve({ book: book.id, user: me.id, by, model, voice, voiceName, name, source: ref });
-      if (admitted.reused) return send({ ok: true, id: String(admitted.id), reused: true });
-      if (source) {
-        enqueue(admitted.id, { source, ...(OFFLINE ? { offline: true } : {}) });
-      } else {
-        // At most two uploads (or link downloads) parse concurrently in this one-process deployment.
-        if (uploading >= 2) throw new QueueFull('Uploads are busy. Try again shortly.');
-        uploading++;
-        try {
-          let bytes: Uint8Array;
-          if (url) {
-            // The offline server downloads nothing: its sample link is its sample book.
-            const file = OFFLINE ? { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode(OFFLINE_BOOK) } : await fetchLink(url.href);
-            ({ name, bytes } = file);
-            db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), admitted.id);
-          } else bytes = new Uint8Array(await req.arrayBuffer());
-          const chapters = await parseBook(name, bytes);
-          db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(createHash('sha256').update(bytes).digest('hex'), admitted.id);
-          prepared(admitted.id, chapters);
-        } finally { uploading--; }
-      }
-      return send({ ok: true, id: String(admitted.id) }, 202);
+      admitted = reserve({ book: bookId, user: me.id, by, model, voice, voiceName, name, source: ref, public: isPublic });
+      const id = admitted.id;
+      if (admitted.reused) return send({ ok: true, id: String(id), reused: true });
+      // At most two uploads (or link downloads) parse concurrently in this one-process deployment.
+      if (uploading >= 2) throw new QueueFull('Uploads are busy. Try again shortly.');
+      uploading++;
+      try {
+        let bytes: Uint8Array;
+        if (url) {
+          // The offline server downloads nothing: its sample link is its sample book.
+          const file = OFFLINE ? { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode(OFFLINE_BOOK) } : await fetchLink(url.href);
+          ({ name, bytes } = file);
+          db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), id);
+        } else bytes = new Uint8Array(await req.arrayBuffer());
+        const chapters = await parseBook(name, bytes);
+        const meta = bookMeta(name, bytes);
+        const title = (q.get('title')?.trim() || meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled').slice(0, 200);
+        const author = (q.get('author')?.trim() || meta.author).slice(0, 200);
+        let cover = '';
+        if (meta.cover) {
+          const file = `${bookId}.${meta.cover.ext}`;
+          // A cover that can't be stored leaves the book without one, not the import failed.
+          try { await saveCover(file, meta.cover.bytes); cover = `/covers/${file}`; } catch (e) { console.error(`cover ${file}: ${(e as Error).message}`); }
+        }
+        db.transaction(() => {
+          db.query("INSERT INTO books (id, title, author, year, cover, description) VALUES (?, ?, ?, 0, ?, '')").run(bookId, title, author, cover);
+          db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(createHash('sha256').update(bytes).digest('hex'), id);
+        })();
+        prepared(id, chapters);
+      } finally { uploading--; }
+      return send({ ok: true, id: String(id) }, 202);
     } catch (e) {
-      if (admitted && !admitted.reused) failJob(admitted.id, e);
+      // A refused import leaves nothing behind; the answer says why.
+      if (admitted && !admitted.reused) await removeAudiobook(admitted.id).catch(() => {});
       return fail(e, e instanceof QueueFull ? 429 : 400);
     }
   } },
 
-  // A version, its chapters and its narrated tracks. Asked with an account: how many chapters it has
-  // waiting or narrating (`mine`, of `limit`), and whether it made this one (`owner`, who may delete it).
-  '/generations/:id': {
-    OPTIONS: preflight,
+  // One audiobook to play: anyone's shared one, or the signed-in person's own private one (any
+  // other answers 404). Its chapters and narrated tracks; asked with an account, how many chapters
+  // that account has waiting or narrating (`mine`, of `limit`) and whether it is theirs (`owner`).
+  '/generations/:id': { OPTIONS: preflight,
     GET: (req) => {
-      const g = getGeneration(Number(req.params.id));
-      if (!g) return send({ error: 'No such audiobook.' }, 404);
-      const book = db.query('SELECT * FROM books WHERE id = ?').get(g.book_id) as BookRow;
-      const me = userOf(req), owner = (g as GenerationRow & { user_id?: number | null }).user_id;
-      return send({ ...versionJson(g), book: bookJson(book, 0), chapters: chaptersJson(g),
-        tracks: tracksOf(g.id).map((t) => ({ idx: t.idx, title: t.title, src: `/audio/${t.file}` })),
-        signedIn: me != null, mine: me ? activeFor(me.id) : 0, limit: MAX_ACTIVE, owner: me != null && owner === me.id });
+      const g = visible(req, Number(req.params.id));
+      if (!g) return noSuch();
+      const me = userOf(req);
+      return send({ id: String(g.id), title: g.title, author: g.author, cover: coverOf(g), by: g.made_by, voice: voiceOf(g),
+        public: g.public === 1, status: g.status, done: g.done, total: g.total, active: activeOf(g.id), error: g.error,
+        chapters: chaptersJson(g), tracks: tracksOf(g.id).map((t) => ({ idx: t.idx, title: t.title, src: audioSrc(g, t.file) })),
+        signedIn: me != null, mine: me ? activeFor(me.id) : 0, limit: MAX_ACTIVE, owner: me != null && g.user_id === me.id });
     },
-    // Only the account that made a version may delete it; its audio goes with it.
+    // The same as DELETE /me/audiobooks/:id: only its maker may delete it, audio and all.
     DELETE: async (req) => {
       const me = userOf(req);
-      if (!me) return signInRequired('delete an audiobook');
-      const g = getGeneration(Number(req.params.id)) as (GenerationRow & { user_id?: number | null }) | null;
-      if (!g) return send({ error: 'No such audiobook.' }, 404);
+      if (!me) return send({ error: 'Sign in to delete an audiobook.' }, 401);
+      const g = visible(req, Number(req.params.id));
+      if (!g) return noSuch();
       if (g.user_id !== me.id) return send({ error: 'Only the person who made this audiobook can delete it.' }, 403);
-      try { await removeGeneration(g.id); return send({ ok: true }); } catch (e) { return fail(e, 500); }
+      try { await removeAudiobook(g.id); return send({ ok: true }); } catch (e) { return fail(e, 500); }
     },
   },
 
-  // Narrate one chapter of a version: anyone signed in may ask, up to MAX_ACTIVE at once.
+  // Narrate one chapter (Generate): anyone signed in may ask of a shared audiobook, its maker of a
+  // private one, up to MAX_ACTIVE chapters waiting or narrating at once.
   '/generations/:id/chapters/:idx': { OPTIONS: preflight, POST: (req) => {
     const me = userOf(req);
-    if (!me) return signInRequired('narrate a chapter');
-    const id = Number(req.params.id), idx = Number(req.params.idx);
-    if (!Number.isSafeInteger(id) || !Number.isSafeInteger(idx) || idx < 0) return send({ error: 'No such chapter.' }, 404);
+    if (!me) return send({ error: 'Sign in to narrate a chapter.' }, 401);
+    const g = visible(req, Number(req.params.id)), idx = Number(req.params.idx);
+    if (!g) return noSuch();
+    if (!Number.isSafeInteger(idx) || idx < 0) return send({ error: 'No such chapter.' }, 404);
     try {
-      const status = requestChapter(id, idx, me.id);
+      const status = requestChapter(g.id, idx, me.id);
       return send({ ok: true, status, mine: activeFor(me.id), limit: MAX_ACTIVE }, status === 'queued' ? 202 : 200);
     } catch (e) {
       return fail(e, e instanceof Refused ? e.status : e instanceof QueueFull ? 429 : 500);
     }
   } },
 
-  // Audio files with byte ranges, so players can seek and stream.
+  // Audio files with byte ranges, so players can seek and stream; a private audiobook's only signed.
+  // A chapter still narrating is served at the same address while it grows (live.ts).
   '/audio/*': async (req) => {
     if (req.method === 'OPTIONS') return preflight();
-    const rel = normalize(decodeURIComponent(new URL(req.url).pathname.slice('/audio/'.length)));
+    const url = new URL(req.url);
+    const rel = normalize(decodeURIComponent(url.pathname.slice('/audio/'.length)));
     if (rel.startsWith('..') || rel.startsWith('/')) return new Response('Not found', { status: 404 });
     try { validateAudioFile(rel); } catch { return send({ error: 'No such audio.' }, 404); }
-    const track = db.query('SELECT storage FROM tracks WHERE file = ? LIMIT 1').get(rel) as { storage: string } | null;
+    const track = db.query('SELECT t.storage, g.public FROM tracks t JOIN generations g ON g.id = t.generation_id WHERE t.file = ? LIMIT 1').get(rel) as { storage: string; public: number } | null;
     if (!track) {
       // A chapter still narrating: what is narrated so far, then the rest as it comes, over one
       // response held open (no idle timeout) until the chapter is done. It has no length yet, so no ranges.
       const [, gen, idx] = /^(\d+)\/(\d+)\.m4a$/.exec(rel) ?? [];
       const live = gen ? liveOf(Number(gen), Number(idx)) : null;
-      if (!live) return send({ error: 'No such audio.' }, 404);
+      const g = live ? getGeneration(Number(gen)) : null;
+      if (!live || !g || (!g.public && !signed(`/audio/${rel}`, url.searchParams))) return send({ error: 'No such audio.' }, 404);
       server.timeout(req, 0);
       return new Response(req.method === 'HEAD' ? null : live.stream(), { headers: { ...CORS, 'content-type': 'audio/aac', 'accept-ranges': 'none', 'cache-control': 'no-store' } });
     }
+    if (!track.public && !signed(`/audio/${rel}`, url.searchParams)) return send({ error: 'No such audio.' }, 404);
+    const cache = track.public ? 'public, max-age=3600' : 'private, max-age=3600';
     if (track.storage === 's3') {
       try { return new Response(null, { status: 302, headers: { ...CORS, location: audioURL(rel), 'cache-control': 'no-store' } }); }
       catch (e) { return fail(e, 503); }
     }
     const file = Bun.file(pathJoin(AUDIO_DIR, rel));
     if (!(await file.exists())) return new Response('Not found', { status: 404, headers: CORS });
-    const common = { ...CORS, 'content-type': audioType(rel), 'accept-ranges': 'bytes', 'cache-control': 'public, max-age=3600' };
+    const common = { ...CORS, 'content-type': audioType(rel), 'accept-ranges': 'bytes', 'cache-control': cache };
     const rangeHeader = req.headers.get('range');
     if (!rangeHeader) return new Response(file, { headers: common });
     const range = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
@@ -327,5 +359,21 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || start < 0 || start > end) return new Response(null, { status: 416, headers: { ...CORS, 'content-range': `bytes */${size}` } });
     return new Response(file.slice(start, end + 1), { status: 206, headers: { ...common, 'content-range': `bytes ${start}-${end}/${size}` } });
   },
+
+  // An import's cover; signed only when every audiobook with it is private.
+  '/covers/*': async (req) => {
+    if (req.method === 'OPTIONS') return preflight();
+    const url = new URL(req.url);
+    const key = url.pathname.slice('/covers/'.length);
+    try { validateCoverFile(key); } catch { return send({ error: 'No such cover.' }, 404); }
+    const path = `/covers/${key}`;
+    const seen = db.query('SELECT MAX(g.public) AS open, COUNT(*) AS n FROM books b JOIN generations g ON g.book_id = b.id WHERE b.cover = ?').get(path) as { open: number | null; n: number };
+    if (!seen.n || (!seen.open && !signed(path, url.searchParams))) return send({ error: 'No such cover.' }, 404);
+    const file = Bun.file(coverPath(key));
+    if (await file.exists()) return new Response(file, { headers: { ...CORS, 'content-type': coverType(key), 'cache-control': seen.open ? 'public, max-age=86400' : 'private, max-age=3600' } });
+    const remote = coverURL(key);
+    if (remote) return new Response(null, { status: 302, headers: { ...CORS, location: remote, 'cache-control': 'no-store' } });
+    return send({ error: 'No such cover.' }, 404);
+  },
 } });
-console.log(`server/index.ts: http://${hostname}:${server.port}${OFFLINE ? ' (offline)' : ` (books from ${providerName})`}`);
+console.log(`server/index.ts: http://${hostname}:${server.port}${OFFLINE ? ' (offline)' : ''}`);

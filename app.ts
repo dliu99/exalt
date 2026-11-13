@@ -13,6 +13,8 @@ const SESSION = 'exalt.session';
 const PLACES = 'exalt.places';
 const VOICE = 'exalt.voice';
 const GOOGLE_NATIVE = 'exalt.google';
+// Downloaded chapters, a folder per audiobook: `<idx>.<ext>` beside `book.json`, the audiobook as it was.
+const OFFLINE = 'app:/cache/offline';
 // Sign in with Apple's web client (a Services ID whose return URL is ${API}/sign-in/return).
 const APPLE_SERVICES_ID: string = import.meta.env.APPLE_SERVICES_ID ?? 'app.exalt.audiobooks.web';
 // Where the server sends the iPhone app's Apple sheet back to; server/config.ts names the same.
@@ -20,8 +22,6 @@ const APP_CALLBACK = 'app.exalt.audiobooks:/signed-in';
 // The iOS client's callback: its "iOS URL scheme" in Google's console, the reversed client ID.
 const GOOGLE_IOS_URL_SCHEME: string = import.meta.env.GOOGLE_IOS_URL_SCHEME ?? 'com.googleusercontent.apps.exalt-ios';
 const GOOGLE_IOS_CALLBACK = `${GOOGLE_IOS_URL_SCHEME}:/oauth2redirect`;
-// Downloaded chapters, a folder per version: `<idx>.<ext>` beside `book.json`, the version as it was.
-const OFFLINE = 'app:/cache/offline';
 export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
   // Downloads, and the notice that a chapter asked for is narrated.
   `fs.read ${OFFLINE}`, `fs.write ${OFFLINE}`, 'device.notifications purpose.notifications',
@@ -32,10 +32,9 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
-type Reply = Result<'createAudiobook'>;
+type Reply = Result<'importBook'>;
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
-type Book = Result<'searchBooks'>[number];
 
 // The session the server answered at sign-in: its bearer token and the name to show. The view
 // sees only whether there is one and the name.
@@ -165,62 +164,93 @@ async function signOut(store: Store) {
   return { ok: true, error: '' };
 }
 
-async function get(path: string, timeout = 15000): Promise<unknown> {
-  const res = await fetch(`${API}${path}`, { exactTimeout: timeout });
+async function get(path: string, timeout = 15000, headers: Record<string, string> = {}): Promise<unknown> {
+  const res = await fetch(`${API}${path}`, { exactTimeout: timeout, headers });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `The server answered ${res.status}.`);
   return body;
 }
 
-const book = (b: Record<string, unknown>): Book => ({
-  id: String(b.id), title: String(b.title), author: String(b.author ?? ''), year: Number(b.year) || 0,
-  cover: String(b.cover ?? ''), description: String(b.description ?? ''), versions: Number(b.versions) || 0,
-});
-const abs = (path: string) => (path ? `${API}${path}` : '');
 
 // The lander's stack: the canon, Plato to Ray Peat, in the handsomest current editions
 // (mostly Penguin Classics), covers in assets/covers named by ISBN.
-const greats: [string, string, string, string][] = [
-  ['9780141442433', 'The Republic', 'Plato', 'c. 375 BC'],
-  ['9780140449334', 'Meditations', 'Marcus Aurelius', 'c. 180'],
-  ['9780140436327', 'Selected Writings', 'Thomas Aquinas', 'c. 1270'],
-  ['9780140449150', 'The Prince', 'Niccolò Machiavelli', '1532'],
-  ['9780140431957', 'Leviathan', 'Thomas Hobbes', '1651'],
-  ['9780140442014', 'The Social Contract', 'Jean-Jacques Rousseau', '1762'],
-  ['9780140432084', 'The Wealth of Nations', 'Adam Smith', '1776'],
-  ['9780140447477', 'Critique of Pure Reason', 'Immanuel Kant', '1781'],
-  ['9780140449013', 'Faust', 'Johann Wolfgang von Goethe', '1808'],
-  ['9780140444490', 'Fear and Trembling', 'Søren Kierkegaard', '1843'],
-  ['9780140447576', 'The Communist Manifesto', 'Karl Marx', '1848'],
-  ['9781400079988', 'War and Peace', 'Leo Tolstoy', '1869'],
-  ['9780140449136', 'Crime and Punishment', 'Fyodor Dostoevsky', '1866'],
-  ['9780140441185', 'Thus Spoke Zarathustra', 'Friedrich Nietzsche', '1883'],
-  ['9780140449235', 'Beyond Good and Evil', 'Friedrich Nietzsche', '1886'],
-  ['9780679720201', 'The Stranger', 'Albert Camus', '1942'],
-  ['9780970291363', 'Generative Energy', 'Ray Peat', '1994'],
+const greats: [string, string, string][] = [
+  ['9780141442433', 'The Republic', 'Plato'],
+  ['9780140449334', 'Meditations', 'Marcus Aurelius'],
+  ['9780140436327', 'Selected Writings', 'Thomas Aquinas'],
+  ['9780140449150', 'The Prince', 'Niccolò Machiavelli'],
+  ['9780140431957', 'Leviathan', 'Thomas Hobbes'],
+  ['9780140442014', 'The Social Contract', 'Jean-Jacques Rousseau'],
+  ['9780140432084', 'The Wealth of Nations', 'Adam Smith'],
+  ['9780140447477', 'Critique of Pure Reason', 'Immanuel Kant'],
+  ['9780140449013', 'Faust', 'Johann Wolfgang von Goethe'],
+  ['9780140444490', 'Fear and Trembling', 'Søren Kierkegaard'],
+  ['9780140447576', 'The Communist Manifesto', 'Karl Marx'],
+  ['9781400079988', 'War and Peace', 'Leo Tolstoy'],
+  ['9780140449136', 'Crime and Punishment', 'Fyodor Dostoevsky'],
+  ['9780140441185', 'Thus Spoke Zarathustra', 'Friedrich Nietzsche'],
+  ['9780140449235', 'Beyond Good and Evil', 'Friedrich Nietzsche'],
+  ['9780679720201', 'The Stranger', 'Albert Camus'],
+  ['9780970291363', 'Generative Energy', 'Ray Peat'],
 ];
+
+// The server answers covers and audio by path ("/covers/…", "/audio/…", a private one's signed
+// with ?exp=&sig=); a cover from elsewhere is already whole, and '' is none.
+const abs = (src: string) => (!src ? '' : /^https?:\/\//.test(src) ? src : `${API}${src}`);
+const str = (v: unknown) => (v == null ? '' : String(v));
+
+// What a request the server refused says, or a fallback.
+async function refusal(res: Response, fallback = 'The server had a problem. Try again.') {
+  const body = (await res.json().catch(() => ({}))) as { error?: string };
+  return body.error || fallback;
+}
+// A session the server no longer knows (signed out elsewhere, or expired): sign in again.
+const SIGN_IN_AGAIN = 'Sign in again to change your library.';
+const UNREACHABLE = 'Can’t reach the server. Check your connection, then try again.';
+
+// One change to an audiobook of the person's own (PATCH or DELETE /me/audiobooks/:id).
+async function change(store: Store, id: string, method: 'PATCH' | 'DELETE', body?: Record<string, unknown>): Promise<Reply> {
+  if (!session(store)) return { ok: false, error: SIGN_IN_AGAIN };
+  try {
+    const res = await fetch(`${API}/me/audiobooks/${encodeURIComponent(id)}`, { method, exactTimeout: 15000,
+      headers: { 'content-type': 'application/json', ...bearer(store) }, body: body ? JSON.stringify(body) : undefined });
+    if (res.status === 401) {
+      store.forget(SESSION);
+      return { ok: false, error: SIGN_IN_AGAIN };
+    }
+    return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
+  } catch {
+    return { ok: false, error: UNREACHABLE };
+  }
+}
 
 // Where the listener is in each audiobook, kept on this device (signed in or not), newest first.
 type Place = Result<'loadPlaces'>[number];
 const places = (store: Store): Place[] => {
-  try { return (JSON.parse(store.get(PLACES) ?? '[]') as Place[]).map((p) => ({ ...p, at: Number(p.at) || 0 })); } catch { return []; }
+  try {
+    return (JSON.parse(store.get(PLACES) ?? '[]') as Place[]).map((p) => ({ gen: str(p.gen), title: str(p.title), author: str(p.author),
+      cover: str(p.cover), track: Number(p.track) || 0, tracks: Number(p.tracks) || 0, time: Number(p.time) || 0,
+      duration: Number(p.duration) || 0, at: Number(p.at) || 0 }));
+  } catch { return []; }
 };
 // A signed-in listener's places are on the server too (GET and PUT /me/places), so the web and
 // the phone carry over. The newest `at` wins; a book finished elsewhere (`finished`, newer than
-// this device's place in it) leaves the shelf here too. Signed out, or the server out of reach,
-// it is this device's alone.
+// this device's place in it) leaves this device's list too. Signed out, or the server out of
+// reach, they are this device's alone.
 type Kept = Place & { finished: boolean };
 let asking: { token: string; rows: Promise<Kept[]> } | null = null;
 function serverPlaces(store: Store): Promise<Kept[]> {
   const s = session(store);
   if (!s) return Promise.resolve([]);
-  // The player's places and Home's shelf ask together: one request answers both.
+  // Several readers asking at once share one request.
   if (asking?.token === s.token) return asking.rows;
   const rows = (async () => {
     const res = await fetch(`${API}/me/places`, { exactTimeout: 8000, headers: bearer(store) });
+    // A session the server no longer knows: signed out here too, so the view offers sign-in.
+    if (res.status === 401) store.forget(SESSION);
     if (!res.ok) return [];
     return ((await res.json()) as Record<string, unknown>[]).map((p) => ({
-      gen: String(p.gen), book: String(p.book), title: String(p.title), author: String(p.author ?? ''), cover: String(p.cover ?? ''),
+      gen: str(p.gen), title: str(p.title), author: str(p.author), cover: abs(str(p.cover)),
       track: Number(p.track) || 0, tracks: Number(p.tracks) || 0, time: Number(p.time) || 0, duration: Number(p.duration) || 0,
       at: Number(p.at) || 0, finished: p.finished === true,
     }));
@@ -228,34 +258,36 @@ function serverPlaces(store: Store): Promise<Kept[]> {
   asking = { token: s.token, rows };
   return rows;
 }
+// The server's copy names the book as it is now (a renamed title, a freshly signed cover), so it
+// gives the title, author and cover whichever copy's position is newer.
 async function placesEverywhere(store: Store): Promise<Place[]> {
   const newest = new Map<string, Place & { finished?: boolean }>();
-  for (const p of [...places(store), ...await serverPlaces(store)]) {
+  const theirs = await serverPlaces(store);
+  for (const p of [...places(store), ...theirs]) {
     const had = newest.get(p.gen);
-    if (!had || p.at > had.at) newest.set(p.gen, p);
+    if (!had || p.at > had.at || (p.at === had.at && 'finished' in p)) newest.set(p.gen, p);
+  }
+  for (const s of theirs) {
+    const kept = newest.get(s.gen);
+    if (kept && kept !== s) newest.set(s.gen, { ...kept, title: s.title, author: s.author, cover: s.cover });
   }
   return [...newest.values()].filter((p) => !p.finished).sort((a, b) => b.at - a.at).slice(0, 24)
-    .map(({ gen, book, title, author, cover, track, tracks, time, duration, at }) => ({ gen, book, title, author, cover, track, tracks, time, duration, at }));
+    .map(({ gen, title, author, cover, track, tracks, time, duration, at }) => ({ gen, title, author, cover, track, tracks, time, duration, at }));
 }
-// The shelf's words for a place: about how long is left (the chapters still to come taken to
-// run as long as this one), and when it was last heard.
-const span = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.max(1, Math.round(s / 60))}m`);
-const leftText = (p: Place) => (p.duration > 0
-  ? `About ${span(p.duration - p.time + (p.tracks - p.track - 1) * p.duration)} left`
-  : `${p.tracks - p.track} ${p.tracks - p.track === 1 ? 'chapter' : 'chapters'} left`);
-const whenText = (at: number, now: number) => {
-  if (!at) return '';
-  const days = Math.floor((new Date(now).setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 86400000);
-  return now - at < 3600000 ? 'Just now' : days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days} days ago`;
-};
-const fraction = (p: Place) => (p.tracks ? Math.min(1, (p.track + (p.duration > 0 ? p.time / p.duration : 0)) / p.tracks) : 0);
 // The voice the listener prefers, from Fish Audio's library (read through OpenRouter's Fish
 // models); empty until they choose one.
 type Pref = Result<'loadVoicePref'>;
 const NO_VOICE: Pref = { id: '', title: '', cover: '' };
+const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: '', voice: '', public: false,
+  status: '', done: 0, total: 0, active: 0, error: '', chapters: [], mine: 0, limit: 0, owner: false };
 
 const sources: Sources = {
   currentAccount: async (_a, store) => {
+    if (!session(store)) {
+      const res = await fetch(`${API}/sign-in/dev`, { method: 'POST', exactTimeout: 4000 }).catch(() => null);
+      const done = res?.ok ? ((await res.json().catch(() => ({}))) as Record<string, unknown>) : null;
+      if (done?.ok) store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || 'Developer') }));
+    }
     const s = session(store);
     return { signedIn: s != null, name: s?.name ?? '' };
   },
@@ -265,19 +297,14 @@ const sources: Sources = {
   signInWith: ([name], store) => signInWith(store, name === 'apple' ? 'apple' : 'google'),
   signOut: (_a, store) => signOut(store),
   idle: async () => ({ ok: true, error: '' }),
-  // Downloads and the chapters asked for (below `sources`).
-  loadOffline: (_a, _store, storage) => keptChapters(storage),
-  downloadVersion: ([gen], store, storage) => downloadVersion(gen, store, storage),
-  removeDownload: ([gen], _store, storage) => removeDownload(gen, storage),
-  chaptersReady: ([keys], store, storage) => chaptersReady(keys, store, storage),
   loadPlaces: async (_a, store) => placesEverywhere(store),
   // Keeps the place, unless the book is finished (the last chapter, within its last half minute).
   // The player saves every 15 seconds while it plays, at a pause and at a chapter's change, never
   // on every tick; a signed-in listener's place goes to the server each time too.
-  savePlace: async ([gen, book, title, author, cover, track, tracks, time, duration, at], store) => {
+  savePlace: async ([gen, title, author, cover, track, tracks, time, duration, at], store) => {
     const done = track >= tracks - 1 && duration > 0 && time >= duration - 30;
     const rest = places(store).filter((p) => p.gen !== gen);
-    const kept = done ? rest : [{ gen, book, title, author, cover, track, tracks, time, duration, at }, ...rest];
+    const kept = done ? rest : [{ gen, title, author, cover, track, tracks, time, duration, at }, ...rest];
     store.set(PLACES, JSON.stringify(kept.slice(0, 24)));
     if (session(store)) {
       await fetch(`${API}/me/places/${encodeURIComponent(gen)}`, { method: 'PUT', exactTimeout: 8000,
@@ -285,26 +312,6 @@ const sources: Sources = {
         body: JSON.stringify({ track, tracks, time, duration, at: Math.round(at), finished: done }) }).catch(() => {});
     }
     return { ok: true, error: '' };
-  },
-  // Home's shelf, six books: the ones in progress here, newest first, then the listener's own, then what is on Exalt.
-  loadShelf: async ([now], store, storage) => {
-    const shelf: Result<'loadShelf'> = [], seen = new Set<string>();
-    const put = (s: Result<'loadShelf'>[number]) => { if (shelf.length < 6 && !seen.has(s.book)) { seen.add(s.book); shelf.push(s); } };
-    for (const p of await placesEverywhere(store)) put({ book: p.book, gen: p.gen, title: p.title, author: p.author, cover: p.cover,
-      chapter: `Chapter ${p.track + 1} of ${p.tracks}`, left: leftText(p), when: whenText(p.at, now), frac: fraction(p) });
-    if (shelf.length < 6) for (const m of await Promise.resolve(sources.loadMine([], store, storage)).catch(() => [])) {
-      const ready = m.status === 'ready';
-      put({ book: m.book, gen: ready ? m.gen : '', title: m.title, author: m.author, cover: m.cover, frac: 0, when: '',
-        chapter: ready ? `${m.total} ${m.total === 1 ? 'chapter' : 'chapters'}` : m.status === 'failed' ? 'Didn’t finish' : m.total ? `Voicing ${m.done} of ${m.total}…` : 'Preparing…', left: ready ? 'Not started' : '' });
-    }
-    if (shelf.length < 6) {
-      // What is on Exalt plays its first finished audiobook.
-      const on = (await Promise.resolve(sources.loadListening([], store, storage)).catch(() => [])).filter((b) => !seen.has(b.id)).slice(0, 6 - shelf.length);
-      const first = await Promise.all(on.map((b) => Promise.resolve(sources.loadBook([b.id], store, storage)).then((d) => d.versions.find((v) => v.status === 'ready')).catch(() => undefined)));
-      on.forEach((b, i) => put({ book: b.id, gen: first[i]?.id ?? '', title: b.title, author: b.author, cover: b.cover, frac: 0, when: '',
-        chapter: first[i] ? `${first[i]!.total} ${first[i]!.total === 1 ? 'chapter' : 'chapters'}` : b.versions === 1 ? '1 audiobook' : `${b.versions} audiobooks`, left: first[i] ? 'Not started' : '' }));
-    }
-    return shelf;
   },
   // Whether the server keeps accounts: the offline one (tests, a first run) has no provider to sign in with, so its door stays open. A server that doesn't say keeps it shut.
   accountRequired: async () => ({ ok: (await get('/door').catch(() => ({})) as { required?: boolean }).required !== false, error: '' }),
@@ -318,112 +325,107 @@ const sources: Sources = {
     return { ok: true, error: '' };
   },
   loadVoices: async ([q]) => ((await get(`/voices?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((v) => ({
-    id: String(v.id), title: String(v.title), description: String(v.description ?? ''), cover: String(v.cover ?? ''),
-    sample: String(v.sample ?? ''), languages: String(v.languages ?? ''), uses: Number(v.uses) || 0,
+    id: str(v.id), title: str(v.title), description: str(v.description), cover: str(v.cover),
+    sample: str(v.sample), languages: str(v.languages), uses: Number(v.uses) || 0,
   })),
-  // What the signed-in listener has made; nothing when signed out.
-  loadMine: async (_a, store) => {
+  loadGreats: async () => greats.map(([isbn, title, author]) => ({ id: isbn, title, author, cover: `assets/covers/${isbn}.jpg` })),
+  loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
+  // The signed-in person's audiobooks, newest first, finished or not; nothing when signed out.
+  loadLibrary: async (_a, store) => {
     if (!session(store)) return [];
     const res = await fetch(`${API}/me/audiobooks`, { exactTimeout: 15000, headers: bearer(store) });
-    if (res.status === 401) return [];
-    const rows = (await res.json().catch(() => [])) as Record<string, unknown>[];
-    return rows.map((g) => ({
-      gen: String(g.id), book: String(g.book), title: String(g.title), author: String(g.author ?? ''), cover: String(g.cover ?? ''),
-      status: String(g.status), done: Number(g.done) || 0, total: Number(g.total) || 0, model: String(g.model), voice: String(g.voice ?? ''),
+    // A session the server no longer knows: signed out here too, so the view offers sign-in.
+    if (res.status === 401) {
+      store.forget(SESSION);
+      return [];
+    }
+    if (!res.ok) throw new Error(await refusal(res));
+    return ((await res.json()) as Record<string, unknown>[]).map((g) => ({
+      id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), status: str(g.status),
+      done: Number(g.done) || 0, total: Number(g.total) || 0, active: Number(g.active) || 0, error: str(g.error),
+      public: g.public === true, voice: str(g.voice),
     }));
   },
-  loadGreats: async () => greats.map(([isbn, title, author, era]) => ({ id: isbn, title, author, era, cover: `assets/covers/${isbn}.jpg` })),
-  searchBooks: async ([q]) => (q.trim() === '' ? [] : ((await get(`/search?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]).map(book)),
-  suggestBooks: async ([q]) => (q.trim().length < 2 ? [] : ((await get(`/search?q=${encodeURIComponent(q)}&limit=6`)) as Record<string, unknown>[]).map(book)),
-  loadListening: async () => ((await get('/listening')) as Record<string, unknown>[]).map(book),
-  loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
-  loadBook: async ([id]) => {
-    if (!id) return { book: { id: '', title: '', author: '', year: 0, cover: '', description: '', versions: 0 }, versions: [] };
-    const body = (await get(`/books/${encodeURIComponent(id)}`, 30000)) as { book: Record<string, unknown>; versions: Record<string, unknown>[] };
-    return {
-      book: book(body.book),
-      versions: body.versions.map((v) => ({
-        id: String(v.id), by: String(v.by), model: String(v.model), voice: String(v.voice), status: String(v.status),
-        done: Number(v.done) || 0, total: Number(v.total) || 0, active: Number(v.active) || 0, error: String(v.error),
-        sample: abs(String(v.sample)), voiceName: String(v.voiceName ?? ''),
-      })),
-    };
-  },
-  loadBookSources: async ([id]) => {
-    if (!id) return { available: false, files: [] };
-    return await get(`/books/${encodeURIComponent(id)}/sources`, 30000) as Result<'loadBookSources'>;
-  },
-  // A version and its chapters. Asked with the session, the server also says how many chapters this
-  // listener has narrating (of how many at once) and whether they made it.
+  // Everyone's shared, finished audiobooks, newest first; `q` narrows to a title or author.
+  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
+    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+  })),
+  // One audiobook to play: a shared one, or the person's own private one (hence the session), its
+  // chapters, and how many chapters this listener has narrating (of how many at once). Out of
+  // reach, a downloaded one answers with the copy kept beside its chapters.
   loadAudiobook: async ([id], store, storage) => {
-    if (!id) return { id: '', book: '', title: '', author: '', cover: '', by: '', model: '', status: '', error: '', chapters: [], mine: 0, limit: 0, owner: false };
-    // Out of reach, a downloaded version answers with the copy kept beside its chapters.
-    const res = await fetch(`${API}/generations/${encodeURIComponent(id)}`, { exactTimeout: 15000, headers: bearer(store) }).catch(async (e) => ({ kept: await keptVersion(id, storage, e) }));
+    if (!id) return NO_AUDIOBOOK;
+    const res = await fetch(`${API}/generations/${encodeURIComponent(id)}`, { exactTimeout: 15000, headers: bearer(store) })
+      .catch(async (e) => ({ kept: await keptVersion(id, storage, e) }));
     if ('kept' in res) return res.kept;
-    const g = (await res.json().catch(() => ({}))) as {
-      id: string; by: string; model: string; status: string; error: string; book: { id: string; title: string; author: string; cover: string };
-      chapters: { idx: number; title: string; src: string; status: string; progress: number; error: string }[];
-      mine?: number; limit?: number; owner?: boolean;
-    };
-    if (!res.ok) throw new Error(g.error ?? `The server answered ${res.status}.`);
+    const g = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) throw new Error(str(g.error) || `The server answered ${res.status}.`);
     return {
-      id: String(g.id), book: String(g.book.id), title: g.book.title, author: g.book.author, cover: g.book.cover, by: g.by, model: g.model,
-      status: String(g.status), error: String(g.error ?? ''), mine: Number(g.mine) || 0, limit: Number(g.limit) || 0, owner: g.owner === true,
-      chapters: g.chapters.map((c) => ({ idx: c.idx, title: c.title, src: abs(c.src), status: c.status, progress: Number(c.progress) || 0, error: String(c.error ?? '') })),
+      id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+      public: g.public === true, status: str(g.status), done: Number(g.done) || 0, total: Number(g.total) || 0,
+      active: Number(g.active) || 0, error: str(g.error), mine: Number(g.mine) || 0, limit: Number(g.limit) || 0, owner: g.owner === true,
+      chapters: ((g.chapters ?? []) as Record<string, unknown>[]).map((c) => ({ idx: Number(c.idx) || 0, title: str(c.title), src: abs(str(c.src)),
+        status: str(c.status), progress: Number(c.progress) || 0, error: str(c.error) })),
     };
   },
-  // Narrate one chapter: anyone signed in may ask, a few at a time.
+  // Narrate one chapter: anyone signed in may ask of a shared audiobook, its owner of a private one, a few at a time.
   generateChapter: async ([gen, idx], store): Promise<Reply> => {
     try {
       const res = await fetch(`${API}/generations/${encodeURIComponent(gen)}/chapters/${idx}`, { method: 'POST', exactTimeout: 15000, headers: bearer(store) });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.status === 401) {
         store.forget(SESSION);
         return { ok: false, error: 'Sign in again to narrate a chapter.' };
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
+      return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
     } catch (e) {
-      if ((e as { code?: string }).code === 'bake') throw e;
-      return { ok: false, error: 'Can’t reach the server. Try again.' };
+      if ((e as Kind).code === 'bake') throw e;
+      return { ok: false, error: UNREACHABLE };
     }
   },
-  // Delete a version this listener made, its audio with it.
-  deleteAudiobook: async ([gen], store): Promise<Reply> => {
+  // An import: the picked file's bytes go up as the request body, or a pasted link (`link`) the
+  // server downloads itself; what to make of them in the query.
+  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Reply> => {
+    if (!session(store)) return { ok: false, error: 'Sign in to import a book.' };
     try {
-      const res = await fetch(`${API}/generations/${encodeURIComponent(gen)}`, { method: 'DELETE', exactTimeout: 15000, headers: bearer(store) });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
-    } catch (e) {
-      if ((e as { code?: string }).code === 'bake') throw e;
-      return { ok: false, error: 'Can’t reach the server. Try again.' };
-    }
-  },
-  // The picked file's bytes go up as the request body; a download (`source`) or a pasted link
-  // (`link`) the server fetches itself.
-  createAudiobook: async ([bookId, path, name, sourceId, link, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
-    try {
-      const remote = sourceId !== '' || link !== '';
-      const bytes = remote ? undefined : await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, source: sourceId, model, voice, voiceName, by, rights: rights ? '1' : '0', ...(link ? { link } : {}) });
-      const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: remote ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+      const bytes = link ? undefined : await storage.fs.readFile(path);
+      const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0', ...(link ? { link } : {}) });
+      const res = await fetch(`${API}/audiobooks?${query}`, {
+        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      // A session the server no longer knows (signed out elsewhere, or expired): sign in again.
       if (res.status === 401) {
         store.forget(SESSION);
-        return { ok: false, error: 'Sign in again to make an audiobook.' };
+        return { ok: false, error: 'Sign in again to import a book.' };
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
+      return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
     } catch (e) {
-      if ((e as { code?: string }).code === 'bake') throw e;
-      return { ok: false, error: 'Can’t reach the server. Check that it’s running, then try again.' };
+      if ((e as Kind).code === 'bake') throw e;
+      return { ok: false, error: UNREACHABLE };
     }
   },
+  // Sharing on asks the person to confirm they have the right to share the book.
+  setSharing: ([id, share, rights], store) => change(store, id, 'PATCH', share ? { public: true, rights } : { public: false }),
+  // This device's place in the book follows: renamed, or gone with it.
+  renameAudiobook: async ([id, title], store) => {
+    const r = await change(store, id, 'PATCH', { title });
+    if (r.ok) store.set(PLACES, JSON.stringify(places(store).map((p) => (p.gen === id ? { ...p, title } : p))));
+    return r;
+  },
+  deleteAudiobook: async ([id], store) => {
+    const r = await change(store, id, 'DELETE');
+    if (r.ok) store.set(PLACES, JSON.stringify(places(store).filter((p) => p.gen !== id)));
+    return r;
+  },
+  // Downloads and the chapters asked for (below).
+  loadOffline: (_a, _store, storage) => keptChapters(storage),
+  downloadVersion: ([gen], store, storage) => downloadVersion(gen, store, storage),
+  removeDownload: ([gen], _store, storage) => removeDownload(gen, storage),
+  chaptersReady: ([keys], store, storage) => chaptersReady(keys, store, storage),
 };
 
 // Downloads. Each chapter is fetched straight into its file (`exactBodyTo`: the host writes the
 // body as it arrives, whole or not at all), so a long chapter never passes through JavaScript.
+// A private audiobook's audio addresses are signed for a few hours, so each download asks for
+// the audiobook afresh first.
 const extOf = (src: string) => /\.(\w{2,5})(?:[?#]|$)/.exec(src)?.[1] ?? 'm4a';
 const missing = (e: unknown) => ['ENOENT', 'ENOTDIR'].includes(String((e as Kind)?.code));
 const encoder = new TextEncoder(), decoder = new TextDecoder();
@@ -433,7 +435,7 @@ async function listDir(storage: Storage, path: string): Promise<string[]> {
 async function makeDir(storage: Storage, path: string) {
   try { await storage.fs.mkdir(path); } catch (e) { if ((e as Kind)?.code !== 'EEXIST') throw e; }
 }
-// A version the server can't be reached for: the copy kept with its download, else the fetch's own failure.
+// An audiobook the server can't be reached for: the copy kept with its download, else the fetch's own failure.
 async function keptVersion(id: string, storage: Storage, failure: unknown): Promise<Audiobook> {
   if ((failure as Kind)?.code === 'bake') throw failure;
   try { return JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
@@ -454,7 +456,7 @@ async function downloadVersion(gen: string, store: Store, storage: Storage): Pro
     const dir = `${OFFLINE}/${gen}`;
     await makeDir(storage, OFFLINE);
     await makeDir(storage, dir);
-    // The version as it is now, first, so what's downloaded plays without a connection even if the rest doesn't land.
+    // The audiobook as it is now, first, so what's downloaded plays without a connection even if the rest doesn't land.
     await storage.fs.atomicWriteFile(`${dir}/book.json`, encoder.encode(JSON.stringify(a)));
     const have = new Set(await listDir(storage, dir));
     for (const c of a.chapters) {
@@ -483,7 +485,7 @@ async function removeDownload(gen: string, storage: Storage): Promise<Reply> {
   }
 }
 // The chapters this listener asked for ("gen/idx", comma-separated) that can be heard now (a chapter
-// plays from its first narrated part), failed, or went with their version. Ones not started yet, or
+// plays from its first narrated part), failed, or went with their audiobook. Ones not started yet, or
 // out of reach, are left for later (a copy kept offline may be old, so only what can't change counts).
 async function chaptersReady(keys: string, store: Store, storage: Storage): Promise<Result<'chaptersReady'>> {
   const asked = keys.split(',').filter(Boolean).map((key) => ({ key, gen: key.split('/')[0], idx: Number(key.split('/')[1]) }));
@@ -502,5 +504,4 @@ async function chaptersReady(keys: string, store: Store, storage: Storage): Prom
   }
   return done;
 }
-
 export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native);

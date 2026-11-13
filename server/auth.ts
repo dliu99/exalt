@@ -237,6 +237,14 @@ export function auth(o: AuthOptions) {
       return { ok: true, token: startSession(me), name: me.name, email: me.email };
     },
 
+    /** A local developer's session, no provider asked (index.ts allows it only with DEV_SIGN_IN=1 on a loopback address). */
+    dev(): Result {
+      db.query(`INSERT INTO users (provider, sub, name, email, created_at) VALUES ('dev', 'local', 'Developer', '', ?)
+        ON CONFLICT(provider, sub) DO NOTHING`).run(now());
+      const me = db.query("SELECT * FROM users WHERE provider = 'dev' AND sub = 'local'").get() as User;
+      return { ok: true, token: startSession(me), name: me.name, email: me.email };
+    },
+
     /** The account a request's bearer token belongs to. */
     user(req: Request): User | null {
       const token = req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1];

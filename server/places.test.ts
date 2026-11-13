@@ -68,7 +68,7 @@ test('the routes: an account is required, and the newest place wins', async () =
 
   const kept = await put(phone, gen, place);
   expect(kept.status).toBe(200);
-  expect(await kept.json()).toEqual({ gen: String(gen), book: 'OL1W', title: 'A Quiet Harbour', author: 'Test Author',
+  expect(await kept.json()).toEqual({ gen: String(gen), title: 'A Quiet Harbour', author: 'Test Author',
     cover: 'https://covers.example/1.jpg', track: 2, tracks: 10, time: 61.5, duration: 300, at, finished: false });
   // The same account on another device finds it.
   expect(await list(web).then((r) => r.json())).toMatchObject([{ gen: String(gen), track: 2, time: 61.5 }]);
@@ -95,6 +95,7 @@ test('app.ts: a place from the phone appears on a fresh browser after sign-in, a
   process.env.API_BASE_URL = address;
   mock.module('@exact/passkeys', () => ({ credentials: {} }));
   mock.module('@exact/sign-in', () => ({ preventSilentAccess: async () => {} }));
+  mock.module('@exact/oauth', () => ({ oauth: () => ({}) }));
   const { answer } = await import('../app.ts');
   const device = (token = '') => {
     const kept = new Map<string, string>(token ? [['exalt.session', JSON.stringify({ token, name: 'Ada' })]] : []);
@@ -104,7 +105,7 @@ test('app.ts: a place from the phone appears on a fresh browser after sign-in, a
   const call = (source: string, args: unknown[], store: ReturnType<typeof device>) =>
     (answer as unknown as (s: string, a: unknown[], st: unknown, sg: unknown) => Promise<any>)(source, args, store, {});
   const save = (store: ReturnType<typeof device>, g: number, track: number, time: number, duration: number, at: number) =>
-    call('savePlace', [String(g), 'OL1W', 'A Quiet Harbour', 'Test Author', 'https://covers.example/1.jpg', track, 10, time, duration, at], store);
+    call('savePlace', [String(g), 'A Quiet Harbour', 'Test Author', 'https://covers.example/1.jpg', track, 10, time, duration, at], store);
 
   // A new account's audiobooks: the first test's places belong to the other two generations' rows.
   const db = new Database(join(dir, 'db.sqlite'));
@@ -118,11 +119,14 @@ test('app.ts: a place from the phone appears on a fresh browser after sign-in, a
   const phone = device(await signIn());
   await save(phone, fresh, 4, 30, 300, t);
 
-  // A browser that has never played it signs in to the same account: the place is there, and on Home's shelf.
+  // A browser that has never played it signs in to the same account: the place is there, and the
+  // audiobook it is in plays there too.
   const web = device(await signIn());
-  expect(await call('loadPlaces', [], web)).toEqual([{ gen: String(fresh), book: 'OL1W', title: 'A Quiet Harbour', author: 'Test Author',
+  expect(await call('loadPlaces', [], web)).toEqual([{ gen: String(fresh), title: 'A Quiet Harbour', author: 'Test Author',
     cover: 'https://covers.example/1.jpg', track: 4, tracks: 10, time: 30, duration: 300, at: t }]);
-  expect((await call('loadShelf', [Date.now()], web))[0]).toMatchObject({ book: 'OL1W', gen: String(fresh), chapter: 'Chapter 5 of 10' });
+  expect(await call('loadAudiobook', [String(fresh)], web)).toMatchObject({ id: String(fresh), title: 'A Quiet Harbour', status: 'ready' });
+  // Neither listener made it, so it is in neither library.
+  expect(await call('loadLibrary', [], web)).toEqual([]);
 
   // The browser listens on; the phone's own, older place gives way to it.
   await save(web, fresh, 5, 12, 300, t + 60_000);
