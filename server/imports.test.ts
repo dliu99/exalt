@@ -149,3 +149,41 @@ test('an import that is not a book keeps no book, and a download needs its book'
     expect(catalog.book).toBe('OL1W');
   } finally { await s.stop(); }
 });
+
+test('a preview says what a file is, keeping nothing', async () => {
+  const s = await start();
+  try {
+    const preview = (query: Record<string, string>, body?: Uint8Array, token = 'ada') =>
+      fetch(`${s.address}/imports/preview?${new URLSearchParams(query)}`,
+        { method: 'POST', body, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/octet-stream' } });
+    expect((await preview({ name: 'a.epub' }, epub(), '')).status).toBe(401);
+
+    // An EPUB: its metadata, its cover inline, its chapter titles in order.
+    const fromEpub = await preview({ name: 'upload.epub' }, epub()).then((r) => r.json());
+    expect(fromEpub).toEqual({ ok: true, error: '', title: 'The Lantern Keeper', author: 'Mara Ellison',
+      cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: ['Chapter One', 'Chapter Two'] });
+
+    // A PDF: its info dictionary, no cover; one page is one part.
+    const fromPdf = await preview({ name: 'scan.pdf' }, pdf()).then((r) => r.json());
+    expect([fromPdf.ok, fromPdf.title, fromPdf.author, fromPdf.cover]).toEqual([true, 'Notes on Tides', 'Iris Okafor', '']);
+    expect(fromPdf.chapters.length).toBeGreaterThan(0);
+
+    // A link (the offline server's sample).
+    const fromLink = await preview({ link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json());
+    expect(fromLink).toEqual({ ok: true, error: '', title: 'A Quiet Harbour', author: '', cover: '',
+      chapters: ['Chapter One: The Harbour', 'Chapter Two: The River', 'Chapter Three: The Sea'] });
+
+    // Not a book, or a link refused: ok false, and why.
+    const notBook = await preview({ name: 'notes.docx' }, strToU8('not a book'));
+    expect(notBook.status).toBe(400);
+    expect(await notBook.json()).toEqual({ ok: false, error: 'Upload an EPUB, PDF or TXT file.' });
+    const refused = await preview({ link: 'https://elsewhere.example/book.epub' }).then((r) => r.json());
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toBeTruthy();
+
+    // Nothing was kept: no book is on the shelf, and the EPUB's book page doesn't exist.
+    expect(await fetch(`${s.address}/listening`).then((r) => r.json())).toEqual([]);
+    const made = await s.importing({ name: 'upload.epub' }, epub()).then((r) => r.json());
+    expect((await fetch(`${s.address}/books/${made.book}`).then((r) => r.json())).versions).toHaveLength(1);
+  } finally { await s.stop(); }
+});

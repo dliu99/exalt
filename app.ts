@@ -35,6 +35,7 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
 type Reply = Result<'deleteAudiobook'>;
 // What an import answers: a Reply, and the id of the book it made or found (`book`; empty on failure).
 type Imported = Reply & { book: string };
+type ImportPreview = Result<'previewImport'>;
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 type Book = Result<'searchBooks'>[number];
@@ -398,6 +399,31 @@ const sources: Sources = {
     } catch (e) {
       if ((e as { code?: string }).code === 'bake') throw e;
       return { ok: false, error: 'Can’t reach the server. Try again.' };
+    }
+  },
+  // What a picked file (`path`, named `name`) or a pasted `link` is, before an audiobook is made of
+  // it: its title, author, cover (a data: URL, or "") and chapter titles. Nothing is kept.
+  previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [] });
+    // Nothing picked or pasted yet: nothing to ask.
+    if (!link && !path) return none('');
+    try {
+      const bytes = link ? undefined : await storage.fs.readFile(path);
+      const query = new URLSearchParams(link ? { link } : { name });
+      const res = await fetch(`${API}/imports/preview?${query}`, {
+        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+      });
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[] };
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return none('Sign in again to add a book.');
+      }
+      if (!res.ok || !body.ok) return none(body.error ?? 'The server had a problem. Try again.');
+      return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
+        chapters: (body.chapters ?? []).map(String) };
+    } catch (e) {
+      if ((e as { code?: string }).code === 'bake') throw e;
+      return none('Can’t reach the server. Check that it’s running, then try again.');
     }
   },
   // The picked file's bytes go up as the request body; a download (`source`) or a pasted link

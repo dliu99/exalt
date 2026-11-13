@@ -25,6 +25,8 @@ const OFFLINE = process.argv.includes('--offline');
 const OFFLINE_LINK = 'https://books.example/a-quiet-harbour.txt';
 // Where the server is reached from outside, for the addresses it hands out (an imported book's cover).
 const PUBLIC_URL = process.env.PUBLIC_URL ?? API;
+// A preview's cover goes back inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
+const PREVIEW_COVER_BYTES = 700 * 1024;
 consolidate();
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST, DELETE', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
@@ -198,6 +200,31 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   // An import with no catalog book: the upload or the file at `link` names its own book (its title,
   // author and cover; catalog.ts localBook), then is made as above. The answer carries the book's id.
   '/imports': { OPTIONS: preflight, POST: (req) => makeAudiobook(req, null) },
+  // What a file is, before anything is made of it: its title, author, cover (a data: URL, empty past
+  // PREVIEW_COVER_BYTES) and chapter titles, from the upload (the body, named by `name`) or the file at
+  // `link`. Nothing is kept. A file that isn't a book answers ok: false with why.
+  '/imports/preview': { OPTIONS: preflight, POST: async (req) => {
+    if (!userOf(req)) return send({ ok: false, error: 'Sign in to add a book.' }, 401);
+    const q = new URL(req.url).searchParams;
+    const link = q.get('link') ?? '';
+    if (link) server.timeout(req, 180);
+    if (uploading >= 2) return send({ ok: false, error: 'Uploads are busy. Try again shortly.' }, 429);
+    uploading++;
+    try {
+      let file: { name: string; bytes: Uint8Array };
+      if (link) {
+        const url = await checkedLink(link);
+        file = OFFLINE ? { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode(OFFLINE_BOOK) } : await fetchLink(url.href);
+      } else file = { name: q.get('name') ?? '', bytes: new Uint8Array(await req.arrayBuffer()) };
+      const meta = await bookMeta(file.name, file.bytes);
+      const chapters = await parseBook(file.name, file.bytes);
+      const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES
+        ? `data:${meta.cover.type};base64,${Buffer.from(meta.cover.bytes).toString('base64')}` : '';
+      return send({ ok: true, error: '', title: meta.title, author: meta.author, cover, chapters: chapters.map((c) => c.title) });
+    } catch (e) {
+      return send({ ok: false, error: String((e as Error).message ?? e) }, 400);
+    } finally { uploading--; }
+  } },
   // A cover read from an imported file.
   '/covers/:id': { OPTIONS: preflight, GET: (req) => {
     const cover = coverOf(req.params.id);
@@ -278,6 +305,19 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   },
 } });
 
+// A pasted link, checked before anything is fetched: its scheme, and that its host is public.
+async function checkedLink(link: string): Promise<URL> {
+  const url = linkURL(link);
+  if (OFFLINE) {
+    // The offline server looks nothing up: an address or localhost is checked as it is; any other link but its sample is refused.
+    if (url.href !== OFFLINE_LINK) {
+      if (isIP(url.hostname.replace(/^\[|\]$/g, '')) || /^(.+\.)?localhost$/i.test(url.hostname)) await checkedAddresses(url, async () => ['127.0.0.1']);
+      throw new LinkRefused('The offline server imports only its sample link.');
+    }
+  } else await checkedAddresses(url);
+  return url;
+}
+
 // Makes an audiobook of a catalog book (`bookId`), or of an import with no book record (`null`):
 // then the file is read first, and what it says it is (its title, author and cover) becomes its book.
 // The answer is `{ ok, id, book }`: the version's id and its book's.
@@ -306,16 +346,7 @@ async function makeAudiobook(req: Request, bookId: string | null): Promise<Respo
   // What is kept of it is its hash, which finds an audiobook already made from it.
   let url: URL | undefined;
   if (link) {
-    try {
-      url = linkURL(link);
-      if (OFFLINE) {
-        // The offline server looks nothing up: an address or localhost is checked as it is; any other link but its sample is refused.
-        if (url.href !== OFFLINE_LINK) {
-          if (isIP(url.hostname.replace(/^\[|\]$/g, '')) || /^(.+\.)?localhost$/i.test(url.hostname)) await checkedAddresses(url, async () => ['127.0.0.1']);
-          throw new LinkRefused('The offline server imports only its sample link.');
-        }
-      } else await checkedAddresses(url);
-    } catch (e) { return fail(e, 400); }
+    try { url = await checkedLink(link); } catch (e) { return fail(e, 400); }
   }
   const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : source;
   // The upload, or the file at the link (the offline server downloads nothing: its sample link is its sample book).
