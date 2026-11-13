@@ -6,12 +6,12 @@ import { isIP } from 'node:net';
 import { join as pathJoin, normalize } from 'node:path';
 import { API, CLIENTS } from './config.ts';
 import { auth, type Provider, type User } from './auth.ts';
-import { consolidate, ensureBook, isProvider, providerName, search } from './catalog.ts';
-import { booksWithAudio, chaptersOf, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
+import { consolidate, ensureBook, isProvider, localBook, providerName, search } from './catalog.ts';
+import { booksWithAudio, chaptersOf, coverOf, db, generationsBy, generationsOf, getGeneration, readyCounts, tracksOf, type BookRow, type GenerationRow } from './db.ts';
 import { AUDIO_DIR, activeFor, enqueue, failJob, MAX_ACTIVE, narrateAhead, OFFLINE_BOOK, prepared, QueueFull, Refused, removeGeneration, requestChapter, reserve } from './jobs.ts';
 import { checkedAddresses, fetchLink, LinkRefused, linkURL } from './link.ts';
 import { liveFile, liveOf } from './live.ts';
-import { parseBook } from './parse.ts';
+import { bookMeta, parseBook } from './parse.ts';
 import { listModels } from './tts.ts';
 import { lg } from './libgen.ts';
 import { audioType, audioURL, validateAudioFile } from './storage.ts';
@@ -23,6 +23,8 @@ let uploading = 0;
 const OFFLINE = process.argv.includes('--offline');
 // The one link the offline server imports (its sample book), so tests can import by link with no network.
 const OFFLINE_LINK = 'https://books.example/a-quiet-harbour.txt';
+// Where the server is reached from outside, for the addresses it hands out (an imported book's cover).
+const PUBLIC_URL = process.env.PUBLIC_URL ?? API;
 consolidate();
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, range, authorization', 'access-control-allow-methods': 'GET, POST, DELETE', 'access-control-expose-headers': 'content-range, accept-ranges, content-length' };
 const send = (body: unknown, status = 200) => Response.json(body, { status, headers: CORS });
@@ -36,7 +38,7 @@ const testKeys = OFFLINE ? process.env.SIGN_IN_TEST_KEYS : undefined;
 const idp = testKeys ? await import(pathJoin(process.env.EXACT2 ?? pathJoin(import.meta.dir, '../../exact'), 'packages/sign-in/test/idp.mjs')) : null;
 const accounts = auth({
   audiences: { apple: [CLIENTS.appId, CLIENTS.appleWeb], google: [CLIENTS.googleWeb, CLIENTS.googleIos] },
-  publicUrl: process.env.PUBLIC_URL ?? API,
+  publicUrl: PUBLIC_URL,
   webOrigins: (process.env.WEB_ORIGINS ?? '').split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean),
   appCallbacks: [CLIENTS.appCallback],
   googleSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -192,68 +194,15 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   // Making an audiobook prepares it: the upload (the request body), the download (`source`) or the
   // file at a pasted link (`link`, link.ts) is split into chapters, and its first is narrated; the
   // rest wait to be asked for. What to make of it is in the query.
-  '/books/:id/generations': { OPTIONS: preflight, POST: async (req) => {
-    const me = userOf(req);
-    if (!me) return signInRequired();
-    const q = new URL(req.url).searchParams;
-    let name = q.get('name') ?? '';
-    const source = q.get('source') ?? '', link = q.get('link') ?? '';
-    if (source || link) server.timeout(req, 180);
-    const model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
-    const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
-    if (q.get('rights') !== '1') return send({ error: 'Confirm you have the right to share an audiobook of this file.' }, 400);
-    if (!model) return send({ error: 'Choose a voice model.' }, 400);
-    if (model.length > 120 || voice.length > 200 || !(await listModels(OFFLINE)).some((m) => m.id === model)) return send({ error: 'Choose one of the available voice models.' }, 400);
-    const book = await ensureBook(req.params.id, OFFLINE).catch(() => null);
-    if (!book) return send({ error: 'No such book.' }, 404);
-    if (source && !/^lg-[a-f0-9]{32}$/.test(source) && !/^zl-\d+-[a-zA-Z0-9]+$/.test(source)) return send({ error: 'Invalid book source.' }, 400);
-    if (!OFFLINE && ((source.startsWith('lg-') && !lg.enabled) || (source.startsWith('zl-') && !zlib.configured))) return send({ error: 'This book source is not connected.' }, 400);
-    if (OFFLINE && source && (source !== 'lg-00000000000000000000000000000001' || book.id !== 'OL1W')) return send({ error: 'No such source.' }, 400);
-    if (source && link) return send({ error: 'Choose a download or a link, not both.' }, 400);
-    // A link is checked before anything is reserved: its scheme, and that its host is public.
-    // What is kept of it is its hash, which finds an audiobook already made from it.
-    let url: URL | undefined;
-    if (link) {
-      try {
-        url = linkURL(link);
-        if (OFFLINE) {
-          // The offline server looks nothing up: an address or localhost is checked as it is; any other link but its sample is refused.
-          if (url.href !== OFFLINE_LINK) {
-            if (isIP(url.hostname.replace(/^\[|\]$/g, '')) || /^(.+\.)?localhost$/i.test(url.hostname)) await checkedAddresses(url, async () => ['127.0.0.1']);
-            throw new LinkRefused('The offline server imports only its sample link.');
-          }
-        } else await checkedAddresses(url);
-      } catch (e) { return fail(e, 400); }
-    }
-    const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : source;
-    let admitted;
-    try {
-      admitted = reserve({ book: book.id, user: me.id, by, model, voice, voiceName, name, source: ref });
-      if (admitted.reused) return send({ ok: true, id: String(admitted.id), reused: true });
-      if (source) {
-        enqueue(admitted.id, { source, ...(OFFLINE ? { offline: true } : {}) });
-      } else {
-        // At most two uploads (or link downloads) parse concurrently in this one-process deployment.
-        if (uploading >= 2) throw new QueueFull('Uploads are busy. Try again shortly.');
-        uploading++;
-        try {
-          let bytes: Uint8Array;
-          if (url) {
-            // The offline server downloads nothing: its sample link is its sample book.
-            const file = OFFLINE ? { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode(OFFLINE_BOOK) } : await fetchLink(url.href);
-            ({ name, bytes } = file);
-            db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), admitted.id);
-          } else bytes = new Uint8Array(await req.arrayBuffer());
-          const chapters = await parseBook(name, bytes);
-          db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(createHash('sha256').update(bytes).digest('hex'), admitted.id);
-          prepared(admitted.id, chapters);
-        } finally { uploading--; }
-      }
-      return send({ ok: true, id: String(admitted.id) }, 202);
-    } catch (e) {
-      if (admitted && !admitted.reused) failJob(admitted.id, e);
-      return fail(e, e instanceof QueueFull ? 429 : 400);
-    }
+  '/books/:id/generations': { OPTIONS: preflight, POST: (req) => makeAudiobook(req, req.params.id) },
+  // An import with no catalog book: the upload or the file at `link` names its own book (its title,
+  // author and cover; catalog.ts localBook), then is made as above. The answer carries the book's id.
+  '/imports': { OPTIONS: preflight, POST: (req) => makeAudiobook(req, null) },
+  // A cover read from an imported file.
+  '/covers/:id': { OPTIONS: preflight, GET: (req) => {
+    const cover = coverOf(req.params.id);
+    if (!cover) return new Response('Not found', { status: 404, headers: CORS });
+    return new Response(cover.bytes, { headers: { ...CORS, 'content-type': cover.type, 'cache-control': 'public, max-age=86400' } });
   } },
 
   // A version, its chapters and its narrated tracks. Asked with an account: how many chapters it has
@@ -328,4 +277,90 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
     return new Response(file.slice(start, end + 1), { status: 206, headers: { ...common, 'content-range': `bytes ${start}-${end}/${size}` } });
   },
 } });
+
+// Makes an audiobook of a catalog book (`bookId`), or of an import with no book record (`null`):
+// then the file is read first, and what it says it is (its title, author and cover) becomes its book.
+// The answer is `{ ok, id, book }`: the version's id and its book's.
+async function makeAudiobook(req: Request, bookId: string | null): Promise<Response> {
+  const me = userOf(req);
+  if (!me) return signInRequired();
+  const q = new URL(req.url).searchParams;
+  let name = q.get('name') ?? '';
+  const source = q.get('source') ?? '', link = q.get('link') ?? '';
+  if (source || link) server.timeout(req, 180);
+  const model = q.get('model') ?? '', voice = q.get('voice') ?? '', voiceName = (q.get('voiceName') ?? '').slice(0, 80);
+  const by = q.get('by')?.trim() || me.name || me.email.split('@')[0] || 'Anonymous';
+  if (q.get('rights') !== '1') return send({ error: 'Confirm you have the right to share an audiobook of this file.' }, 400);
+  if (!model) return send({ error: 'Choose a voice model.' }, 400);
+  if (model.length > 120 || voice.length > 200 || !(await listModels(OFFLINE)).some((m) => m.id === model)) return send({ error: 'Choose one of the available voice models.' }, 400);
+  let book: BookRow | null = null;
+  if (bookId !== null) {
+    book = await ensureBook(bookId, OFFLINE).catch(() => null);
+    if (!book) return send({ error: 'No such book.' }, 404);
+  } else if (source) return send({ error: 'A download needs its book. Choose a file or paste a link.' }, 400);
+  if (source && !/^lg-[a-f0-9]{32}$/.test(source) && !/^zl-\d+-[a-zA-Z0-9]+$/.test(source)) return send({ error: 'Invalid book source.' }, 400);
+  if (!OFFLINE && ((source.startsWith('lg-') && !lg.enabled) || (source.startsWith('zl-') && !zlib.configured))) return send({ error: 'This book source is not connected.' }, 400);
+  if (OFFLINE && source && (source !== 'lg-00000000000000000000000000000001' || book?.id !== 'OL1W')) return send({ error: 'No such source.' }, 400);
+  if (source && link) return send({ error: 'Choose a download or a link, not both.' }, 400);
+  // A link is checked before anything is reserved: its scheme, and that its host is public.
+  // What is kept of it is its hash, which finds an audiobook already made from it.
+  let url: URL | undefined;
+  if (link) {
+    try {
+      url = linkURL(link);
+      if (OFFLINE) {
+        // The offline server looks nothing up: an address or localhost is checked as it is; any other link but its sample is refused.
+        if (url.href !== OFFLINE_LINK) {
+          if (isIP(url.hostname.replace(/^\[|\]$/g, '')) || /^(.+\.)?localhost$/i.test(url.hostname)) await checkedAddresses(url, async () => ['127.0.0.1']);
+          throw new LinkRefused('The offline server imports only its sample link.');
+        }
+      } else await checkedAddresses(url);
+    } catch (e) { return fail(e, 400); }
+  }
+  const ref = url ? `link:${createHash('sha256').update(url.href).digest('hex').slice(0, 32)}` : source;
+  // The upload, or the file at the link (the offline server downloads nothing: its sample link is its sample book).
+  const read = async (): Promise<Uint8Array> => {
+    if (!url) return new Uint8Array(await req.arrayBuffer());
+    const file = OFFLINE ? { name: 'A Quiet Harbour.txt', bytes: new TextEncoder().encode(OFFLINE_BOOK) } : await fetchLink(url.href);
+    name = file.name;
+    return file.bytes;
+  };
+  let admitted;
+  let busy = false;
+  try {
+    let bytes: Uint8Array | undefined, hash = '';
+    let chapters: Awaited<ReturnType<typeof parseBook>> | undefined;
+    if (!source) {
+      // At most two uploads (or link downloads) parse concurrently in this one-process deployment.
+      if (uploading >= 2) throw new QueueFull('Uploads are busy. Try again shortly.');
+      uploading++; busy = true;
+    }
+    if (!book) {
+      // An import: the file is read and parsed before anything is kept, since it names the book;
+      // a file that isn't a book leaves no book behind.
+      bytes = await read();
+      hash = createHash('sha256').update(bytes).digest('hex');
+      const meta = await bookMeta(name, bytes);
+      chapters = await parseBook(name, bytes);
+      book = localBook(meta, hash, PUBLIC_URL);
+    }
+    admitted = reserve({ book: book.id, user: me.id, by, model, voice, voiceName, name, source: ref });
+    if (admitted.reused) return send({ ok: true, id: String(admitted.id), book: book.id, reused: true });
+    if (source) enqueue(admitted.id, { source, ...(OFFLINE ? { offline: true } : {}) });
+    else {
+      if (!bytes) {
+        bytes = await read();
+        hash = createHash('sha256').update(bytes).digest('hex');
+        chapters = await parseBook(name, bytes);
+      }
+      if (url) db.query('UPDATE generations SET source_name = ? WHERE id = ?').run(name.slice(0, 200), admitted.id);
+      db.query('UPDATE generations SET source_hash = ? WHERE id = ?').run(hash, admitted.id);
+      prepared(admitted.id, chapters!);
+    }
+    return send({ ok: true, id: String(admitted.id), book: book.id }, 202);
+  } catch (e) {
+    if (admitted && !admitted.reused) failJob(admitted.id, e);
+    return fail(e, e instanceof QueueFull ? 429 : 400);
+  } finally { if (busy) uploading--; }
+}
 console.log(`server/index.ts: http://${hostname}:${server.port}${OFFLINE ? ' (offline)' : ` (books from ${providerName})`}`);

@@ -456,3 +456,69 @@ export function chunks(text: string, max = 3000, first = max): string[] {
 // about 600 characters (some 40 seconds of speech) and grow to 3,000. The first part is back
 // from the provider in seconds, and plays while the larger ones are narrated.
 export const partsOf = (title: string, text: string) => chunks(`${title}. ${text}`, 3000, 600);
+
+// What a file says it is, for a book imported with no catalog record: an EPUB's package metadata
+// (dc:title, dc:creator) and its cover image, a PDF's info dictionary, else its file name.
+export type Cover = { type: string; bytes: Uint8Array };
+export type Meta = { title: string; author: string; cover: Cover | null };
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+
+// "the_quiet-harbour (2nd ed).epub" → "the quiet-harbour (2nd ed)".
+export const titleFromName = (name: string) =>
+  tidy(name.replace(/\.(epub|pdf|txt|text)$/i, '').replace(/[_+]+/g, ' ')).slice(0, 200) || 'Untitled';
+
+export async function bookMeta(name: string, bytes: Uint8Array): Promise<Meta> {
+  const ext = name.toLowerCase().split('.').pop();
+  let meta: Partial<Meta> = {};
+  try {
+    if (ext === 'epub') meta = epubMeta(bytes);
+    else if (ext === 'pdf') meta = await pdfMeta(bytes);
+  } catch { /* unreadable metadata: the file name stands in */ }
+  const clean = (s: string | undefined) => tidy(unligate(s ?? '')).slice(0, 200);
+  return { title: clean(meta.title) || titleFromName(name), author: clean(meta.author), cover: meta.cover ?? null };
+}
+
+function epubMeta(bytes: Uint8Array): Partial<Meta> {
+  let expanded = 0;
+  const files = unzipSync(bytes, { filter(file) {
+    if (!/\.(xml|opf|jpe?g|png|gif|webp)$/i.test(file.name)) return false;
+    expanded += file.originalSize;
+    return expanded <= 20 * 1024 * 1024 && file.originalSize <= MAX_COVER_BYTES;
+  } });
+  const names = new Map(Object.keys(files).map((p) => [p.toLowerCase(), p]));
+  const real = (path: string) => (files[path] ? path : names.get(path.toLowerCase()) ?? path);
+  const read = (path: string) => (files[real(path)] ? strFromU8(files[real(path)]) : '');
+  const opfPath = attr(read('META-INF/container.xml').match(/<rootfile\b[^>]*>/i)?.[0] ?? '', 'full-path');
+  const opf = read(opfPath);
+  if (!opf) return {};
+  const dc = (tag: string) => tidy(htmlText(opf.match(new RegExp(`<dc:${tag}\\b[^>]*>([\\s\\S]*?)</dc:${tag}>`, 'i'))?.[1] ?? ''));
+  // Several creators read as one line; an EPUB 2 role other than author (an editor, a translator) is left out.
+  const creators = [...opf.matchAll(/<dc:creator\b([^>]*)>([\s\S]*?)<\/dc:creator>/gi)]
+    .filter((m) => !/opf:role\s*=\s*["'](?!aut)/i.test(m[1])).map((m) => tidy(htmlText(m[2]))).filter(Boolean);
+  // The cover: the EPUB 3 manifest item marked cover-image, else the EPUB 2 <meta name="cover">'s item.
+  const itemTags = opf.match(/<item\b[^>]*>/gi) ?? [];
+  const coverId = attr(opf.match(/<meta\b[^>]*name\s*=\s*["']cover["'][^>]*>/i)?.[0] ?? '', 'content');
+  const coverTag = itemTags.find((t) => /(^|\s)cover-image(\s|$)/.test(attr(t, 'properties'))) ?? itemTags.find((t) => coverId && attr(t, 'id') === coverId);
+  let cover: Cover | null = null;
+  const target = coverTag ? resolve(opfPath, attr(coverTag, 'href')) : null;
+  if (target) {
+    const data = files[real(target.file)];
+    const type = attr(coverTag!, 'media-type') || IMAGE_TYPES[target.file.toLowerCase().split('.').pop() ?? ''] || '';
+    if (data?.length && /^image\/(jpeg|png|gif|webp)$/.test(type)) cover = { type, bytes: data };
+  }
+  return { title: dc('title'), author: [...new Set(creators)].join(', '), cover };
+}
+
+async function pdfMeta(bytes: Uint8Array): Promise<Partial<Meta>> {
+  const { getDocumentProxy } = await import('unpdf');
+  // pdf.js may take the buffer it is given; it reads a copy so the parse after it still has the bytes.
+  const pdf = await getDocumentProxy(bytes.slice());
+  try {
+    const { info } = (await pdf.getMetadata()) as { info?: { Title?: unknown; Author?: unknown } };
+    const str = (v: unknown) => (typeof v === 'string' ? v : '');
+    return { title: str(info?.Title), author: str(info?.Author) };
+  } finally {
+    await pdf.loadingTask.destroy();
+  }
+}

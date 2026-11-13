@@ -32,7 +32,9 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
-type Reply = Result<'createAudiobook'>;
+type Reply = Result<'deleteAudiobook'>;
+// What an import answers: a Reply, and the id of the book it made or found (`book`; empty on failure).
+type Imported = Reply & { book: string };
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 type Book = Result<'searchBooks'>[number];
@@ -399,25 +401,27 @@ const sources: Sources = {
     }
   },
   // The picked file's bytes go up as the request body; a download (`source`) or a pasted link
-  // (`link`) the server fetches itself.
-  createAudiobook: async ([bookId, path, name, sourceId, link, model, voice, voiceName, by, rights], store, storage): Promise<Reply> => {
+  // (`link`) the server fetches itself. With no book (`bookId` ""), an import: the server reads the
+  // file's title, author and cover, keeps a book for it, and answers its id (`book`) to open next.
+  createAudiobook: async ([bookId, path, name, sourceId, link, model, voice, voiceName, by, rights], store, storage): Promise<Imported> => {
     try {
       const remote = sourceId !== '' || link !== '';
       const bytes = remote ? undefined : await storage.fs.readFile(path);
       const query = new URLSearchParams({ name, source: sourceId, model, voice, voiceName, by, rights: rights ? '1' : '0', ...(link ? { link } : {}) });
-      const res = await fetch(`${API}/books/${encodeURIComponent(bookId)}/generations?${query}`, {
+      const at = bookId === '' ? '/imports' : `/books/${encodeURIComponent(bookId)}/generations`;
+      const res = await fetch(`${API}${at}?${query}`, {
         method: 'POST', body: bytes, exactTimeout: remote ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
       });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      const body = (await res.json().catch(() => ({}))) as { error?: string; book?: string };
       // A session the server no longer knows (signed out elsewhere, or expired): sign in again.
       if (res.status === 401) {
         store.forget(SESSION);
-        return { ok: false, error: 'Sign in again to make an audiobook.' };
+        return { ok: false, error: 'Sign in again to make an audiobook.', book: '' };
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: body.error ?? 'The server had a problem. Try again.' };
+      return res.ok ? { ok: true, error: '', book: String(body.book ?? bookId) } : { ok: false, error: body.error ?? 'The server had a problem. Try again.', book: '' };
     } catch (e) {
       if ((e as { code?: string }).code === 'bake') throw e;
-      return { ok: false, error: 'Can’t reach the server. Check that it’s running, then try again.' };
+      return { ok: false, error: 'Can’t reach the server. Check that it’s running, then try again.', book: '' };
     }
   },
 };

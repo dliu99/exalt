@@ -10,7 +10,8 @@
 // (`OL123W`).
 import { lg } from './libgen.ts';
 import { zlib, type ZBook } from './zlibrary.ts';
-import { allBooksByAudio, type BookRow, getBook, link, linkedBook, mergeBooks, savedBooks, upsertBook } from './db.ts';
+import { createHash } from 'node:crypto';
+import { allBooksByAudio, type BookRow, getBook, keepCover, link, linkedBook, mergeBooks, savedBooks, upsertBook } from './db.ts';
 
 // What a provider answers: a book, and the other names it goes by (its editions' ISBNs).
 export type Found = BookRow & { refs: string[] };
@@ -458,4 +459,22 @@ export function consolidate() {
     if (owner && owner !== b.id && getBook(owner)) { mergeBooks(owner, b.id); continue; }
     link(b.id, [b.id, key]);
   }
+}
+
+// A book imported with no catalog record: what the file says it is (parse.ts bookMeta). One already
+// saved under the same title and author is that book; else a local record, `local-<hash>`, named by
+// its title and author (or, with no author, by the file's own hash), with the file's cover if it has
+// one, served at `${publicUrl}/covers/<id>`.
+export function localBook(meta: { title: string; author: string; cover: { type: string; bytes: Uint8Array } | null }, fileHash: string, publicUrl: string): BookRow {
+  const key = workKey(meta.title, meta.author);
+  const known = key ? linkedBook([key]) : null;
+  const id = known && getBook(known) ? known
+    : `local-${createHash('sha256').update(key || `file:${fileHash}`).digest('hex').slice(0, 16)}`;
+  const saved = getBook(id);
+  const coverURL = `${publicUrl.replace(/\/$/, '')}/covers/${id}`;
+  if (!saved) upsertBook({ id, title: meta.title, author: meta.author, year: 0, cover: meta.cover ? coverURL : '', description: '' });
+  else if (meta.cover && !saved.cover) upsertBook({ ...saved, cover: coverURL });
+  if (meta.cover && !saved?.cover) keepCover(id, meta.cover.type, meta.cover.bytes);
+  link(id, [id, key]);
+  return getBook(id)!;
 }

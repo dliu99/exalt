@@ -164,3 +164,13 @@ export const savedBooks = () => db.query(`SELECT b.*, (SELECT COUNT(*) FROM gene
 // What one person has made, newest first, each with its book.
 export const generationsBy = (userId: number) => db.query(`SELECT g.*, b.title, b.author, b.cover
   FROM generations g JOIN books b ON b.id = g.book_id WHERE g.user_id = ? ORDER BY g.id DESC`).all(userId) as (GenerationRow & { title: string; author: string; cover: string })[];
+
+// A cover read from an imported file (an EPUB's cover image), served at /covers/<book id>.
+db.run(`CREATE TABLE IF NOT EXISTS covers (
+  book_id TEXT PRIMARY KEY REFERENCES books(id),
+  type TEXT NOT NULL,
+  bytes BLOB NOT NULL
+)`);
+export const keepCover = (bookId: string, type: string, bytes: Uint8Array) =>
+  db.query('INSERT OR REPLACE INTO covers (book_id, type, bytes) VALUES (?, ?, ?)').run(bookId, type, bytes);
+export const coverOf = (bookId: string) => db.query('SELECT type, bytes FROM covers WHERE book_id = ?').get(bookId) as { type: string; bytes: Uint8Array } | null;
