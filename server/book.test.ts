@@ -52,3 +52,65 @@ test('the app refuses what the server refuses', async () => {
   const big = zipSync({ 'chapter.xhtml': strToU8('x'.repeat(9 * 1024 * 1024)) });
   await expect(readBook('large.epub', big)).rejects.toThrow('expands beyond');
 });
+
+// A Gutenberg-style EPUB: its parts listed beside their chapters, a caption glued into a heading,
+// a chapter's own heading naming it, a title page, a dedication and the license.
+const page = (body: string) => strToU8(`<html><body>${body}</body></html>`);
+const ids = ['t', 'd', 'b1', 'c1', 'c2', 'b2', 'c3', 'c4', 'l'];
+const parted = zipSync({
+  mimetype: [strToU8('application/epub+zip'), { level: 0 }],
+  'META-INF/container.xml': strToU8('<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>'),
+  'content.opf': strToU8(`<?xml version="1.0"?><package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>The Long Year; or, Seasons</dc:title></metadata>
+    <manifest>${ids.map((id) => `<item id="${id}" href="${id}.xhtml" media-type="application/xhtml+xml"/>`).join('')}
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest>
+    <spine>${ids.map((id) => `<itemref idref="${id}"/>`).join('')}</spine></package>`),
+  'nav.xhtml': strToU8(`<html><body><nav epub:type="toc"><ol>${[['t', 'THE LONG YEAR; or, SEASONS.'], ['d', 'DEDICATION'], ['b1', 'BOOK ONE: WINTER'], ['c1', 'CHAPTER I'],
+    ['c2', 'He rode a black horse. CHAPTER II.'], ['b2', 'BOOK TWO: SPRING'], ['c3', 'CHAPTER I'], ['c4', 'CHAPTER II'], ['l', 'THE FULL PROJECT GUTENBERG™ LICENSE']]
+    .map(([id, t]) => `<li><a href="${id}.xhtml">${t}</a></li>`).join('')}</ol></nav></body></html>`),
+  't.xhtml': page(`<h1>THE LONG YEAR</h1><p>A novel in two books.</p>${prose('title')}`),
+  'd.xhtml': page(`<h2>Dedication</h2>${prose('dear')}`),
+  'b1.xhtml': page('<h2>BOOK ONE: WINTER</h2>'),
+  'c1.xhtml': page(`<h2>CHAPTER I. THE FIRST SNOW</h2>${prose('snow')}`),
+  'c2.xhtml': page(`<h2><span class="caption">He rode a black horse.</span><br/>CHAPTER II.</h2>${prose('horse')}`),
+  'b2.xhtml': page('<h2>BOOK TWO: SPRING</h2>'),
+  'c3.xhtml': page(`<h2>CHAPTER I</h2>${prose('thaw')}`),
+  'c4.xhtml': page(`<h2>CHAPTER II</h2>${prose('rain')}`),
+  'l.xhtml': page(`<h2>THE FULL PROJECT GUTENBERG™ LICENSE</h2>${prose('license')}`),
+});
+
+test('titles are read one way, on the phone as on the server: names shown, headings narrated, parts kept', async () => {
+  const { chapters } = await readBook('year.epub', parted);
+  expect(chapters).toEqual(await parseBook('year.epub', parted));
+  // The title page, the dedication and the license are left out; Chapter 1 repeats, so each shows its book.
+  expect(chapters.map((c) => [c.title, c.heading])).toEqual([
+    ['Book 1 · The First Snow', 'Book 1. Winter. Chapter 1. The First Snow.'],
+    ['Book 1 · Chapter 2', 'Chapter 2.'],
+    ['Book 2 · Chapter 1', 'Book 2. Spring. Chapter 1.'],
+    ['Book 2 · Chapter 2', 'Chapter 2.'],
+  ]);
+  expect(chapters[0].parts).toEqual({ kind: 'chapter', label: 'Chapter', n: 1, name: 'The First Snow', part: 'Book 1: Winter' });
+  // The page's own heading names the chapter and isn't narrated twice; the caption isn't narrated at all.
+  expect(chapters[0].text.startsWith('snow snow')).toBe(true);
+  expect(chapters[1].text.startsWith('horse horse')).toBe(true);
+});
+
+test('a plain-text book is read between its Gutenberg lines, past its contents, at its headings and not at prose', async () => {
+  const para = (w: string) => `${Array(30).fill(w).join(' ')}.\n${Array(30).fill(w).join(' ')}.`;
+  const txt = strToU8([
+    'The Project Gutenberg eBook of The Long Year', 'license words here', '*** START OF THE PROJECT GUTENBERG EBOOK THE LONG YEAR ***', '',
+    'CONTENTS', '', 'BOOK THE FIRST—WINTER', '', 'CHAPTER I. The First Snow', '', 'CHAPTER II. The Thaw', '', 'BOOK THE SECOND—SPRING', '', 'CHAPTER I. Rain', '', '',
+    'BOOK THE FIRST—WINTER', '', 'CHAPTER I.', 'The First Snow', '', para('snow'),
+    'part of the fence fell, and the dog', 'ran out into the road.', '', 'CHAPTER II. The Thaw', '', para('thaw'),
+    'Chapter 3 of the almanac said so, and', 'nobody argued.', '', 'BOOK THE SECOND—SPRING', '', 'CHAPTER I. Rain', '', para('rain'),
+    '*** END OF THE PROJECT GUTENBERG EBOOK THE LONG YEAR ***', 'THE FULL PROJECT GUTENBERG LICENSE', para('license'),
+  ].join('\r\n'));
+  const { chapters } = await readBook('year.txt', txt);
+  expect(chapters).toEqual(await parseBook('year.txt', txt));
+  expect(chapters.map((c) => [c.title, c.heading])).toEqual([
+    ['The First Snow', 'Book 1. Winter. Chapter 1. The First Snow.'],
+    ['The Thaw', 'Chapter 2. The Thaw.'],
+    ['Rain', 'Book 2. Spring. Chapter 1. Rain.'],
+  ]);
+  expect(chapters.some((c) => /license/.test(c.text))).toBe(false);
+  expect(chapters[0].text).toContain('part of the fence fell');
+});

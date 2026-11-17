@@ -5,12 +5,25 @@
 // DecompressionStream (nativeZip), ending its turn (`pause`) between files and chapters, since the
 // app's data module runs on an interpreter with a budget per turn. Both read the same chapters. EPUB follows its table
 // of contents (the EPUB 3 nav, else the EPUB 2 NCX) and falls back to the spine; TXT splits at
-// "Chapter" headings. Cover, title, copyright, contents, index and similar pages are left out;
-// forewords, prefaces, introductions, prologues and epilogues stay. Anything without chapters is cut
-// into parts of about PART_WORDS words. Ligatures are read as their letters.
+// its headings. Titles are read one way across books (titles.ts): "CHAPTER IV. LOOMINGS." is shown
+// as "Loomings" and narrated as "Chapter 4. Loomings.", and a part names its chapters. Cover, title,
+// copyright, contents, dedication, acknowledgments, about-the-author, index and similar pages and
+// Project Gutenberg's license are left out; forewords, prefaces, introductions, prologues and
+// epilogues stay. Anything without chapters is cut into parts of about PART_WORDS words. Ligatures
+// are read as their letters.
 import { strFromU8, unzipSync } from 'fflate';
+import { isHeadingLine, normalizeChapters, normalizeTitle } from './titles.ts';
 
-export type Chapter = { title: string; text: string };
+// A chapter's title as titles.ts reads it: what kind of section it is, the book's word for it and
+// its number ("Chapter", 4), its name, and the part it's in. Kept so the app can show them otherwise.
+export type TitleParts = { kind: 'chapter' | 'front' | 'back'; label?: string; n?: number | string; name?: string; part?: string };
+// A chapter to narrate: `title` is the chapter list's line ("Loomings", "Chapter 4"), `heading`
+// what's narrated before the text ("Chapter 4. Loomings."). Chapters kept before titles were read
+// have only a title, narrated as it is.
+export type Chapter = { title: string; text: string; heading?: string; parts?: TitleParts };
+// A chapter as a book's structure gives it, before its title is read: its table of contents label
+// (or TXT heading, or outline title), the part it sits in, and the heading its own page opens with.
+export type RawChapter = { title: string; text: string; part?: string; own?: string };
 const PART_WORDS = 4000;
 // Text before the first table-of-contents entry, and a part's pages before its first chapter, become
 // a chapter of their own only from this many words: shorter runs are title pages and epigraphs.
@@ -89,23 +102,42 @@ export function nativeZip(bytes: Uint8Array): Zip {
   } };
 }
 
+// A book's chapters before titles are read, and its own title (an EPUB's dc:title), which names its title page.
+export type RawBook = { chapters: RawChapter[]; bookTitle: string };
+
 /** An EPUB's or TXT's chapters as raw text, or null for any other kind of file. */
-export async function readChapters(name: string, bytes: Uint8Array, pause: Pause = noPause, open: (b: Uint8Array) => Zip = fflateZip): Promise<Chapter[] | null> {
+export async function readChapters(name: string, bytes: Uint8Array, pause: Pause = noPause, open: (b: Uint8Array) => Zip = fflateZip): Promise<RawBook | null> {
   const ext = name.toLowerCase().split('.').pop();
-  return ext === 'epub' ? parseEpub(open(bytes), pause) : ext === 'txt' ? parseTxt(utf8(bytes), pause) : null;
+  return ext === 'epub' ? parseEpub(open(bytes), pause) : ext === 'txt' ? { chapters: await parseTxt(utf8(bytes), pause), bookTitle: '' } : null;
 }
 
-/** The chapters to narrate: ligatures read, space tidied, ones with too few words left out, the book within the limit. */
-export async function keptChapters(chapters: Chapter[], maxChars = DEFAULT_MAX_CHARS, pause: Pause = noPause): Promise<Chapter[]> {
-  const kept: Chapter[] = [];
+/** The chapters to narrate: ligatures read, space tidied, ones with too few words left out, titles
+ * read (titles.ts) and front and back matter that isn't narrated left out, the book within the limit. */
+export async function keptChapters(chapters: RawChapter[], maxChars = DEFAULT_MAX_CHARS, pause: Pause = noPause, bookTitle = ''): Promise<Chapter[]> {
+  const kept: RawChapter[] = [], sizes: number[] = [];
   for (const c of chapters) {
-    const k = { title: unligate(c.title), text: tidy(unligate(c.text)) };
-    if (k.text.split(' ').length >= 20) kept.push(k);
+    const k: RawChapter = { title: unligate(c.title), text: tidy(unligate(c.text)) };
+    if (c.part) k.part = tidy(unligate(c.part));
+    if (c.own) k.own = tidy(unligate(c.own));
+    const n = k.text.split(' ').length;
+    if (n >= 20) { kept.push(k); sizes.push(n); }
     await pause();
   }
-  if (kept.length === 0) throw new Error('No readable text was found in this file.');
-  if (kept.reduce((n, c) => n + c.text.length + c.title.length, 0) > maxChars) throw new Error(`This book exceeds the ${maxChars.toLocaleString('en-US')}-character narration limit.`);
-  return kept;
+  const titles = await normalizeChapters(kept.map((c, i) => ({ title: c.title, heading: c.own, part: c.part, words: sizes[i] })), bookTitle, pause);
+  const read: Chapter[] = [];
+  for (let i = 0; i < kept.length; i++) {
+    const c = kept[i], t = titles[i];
+    if (t.kind === 'skip') continue;
+    const parts: TitleParts = { kind: t.kind };
+    if (t.label) parts.label = t.label;
+    if (t.n !== undefined) parts.n = t.n;
+    if (t.name) parts.name = t.name;
+    if (t.part) parts.part = t.part.label && t.part.n !== undefined ? [`${t.part.label} ${t.part.n}`, t.part.name].filter(Boolean).join(': ') : t.part.display;
+    read.push({ title: t.display, text: c.text, heading: t.heading, parts });
+  }
+  if (read.length === 0) throw new Error('No readable text was found in this file.');
+  if (read.reduce((n, c) => n + c.text.length + c.title.length, 0) > maxChars) throw new Error(`This book exceeds the ${maxChars.toLocaleString('en-US')}-character narration limit.`);
+  return read;
 }
 
 /** An EPUB or TXT read as the server reads it: its chapters to narrate (or why not), and what it
@@ -114,8 +146,8 @@ export async function readBook(name: string, bytes: Uint8Array, pause: Pause = n
   const ext = name.toLowerCase().split('.').pop();
   if (ext !== 'epub' && ext !== 'txt') throw new Error('Upload an EPUB, PDF or TXT file.');
   const zip = ext === 'epub' ? open(bytes) : null;
-  const raw = zip ? await parseEpub(zip, pause) : await parseTxt(utf8(bytes), pause);
-  const chapters = await keptChapters(raw, DEFAULT_MAX_CHARS, pause);
+  const raw = zip ? await parseEpub(zip, pause) : { chapters: await parseTxt(utf8(bytes), pause), bookTitle: '' };
+  const chapters = await keptChapters(raw.chapters, DEFAULT_MAX_CHARS, pause, raw.bookTitle);
   return { chapters, meta: zip ? await zipMeta(zip) : { title: '', author: '', cover: null } };
 }
 
@@ -135,22 +167,56 @@ function parts(text: string, label = 'Part'): Chapter[] {
   return out;
 }
 
-// Headings are found 64 KiB of lines at a time, a turn each: a piece ends just after a newline, so
-// every line is whole in one piece and its matches are those of the whole text.
-async function parseTxt(text: string, pause: Pause): Promise<Chapter[]> {
-  const heading = /^[ \t]*((?:chapter|book|part)\b[^\n]{0,80})$/gim;
+// A heading is a line naming a section and its number ("CHAPTER I.", "Letter 1", "I. A SCANDAL IN
+// BOHEMIA"; titles.ts isHeadingLine): a line of prose that only starts with "part" or "book" isn't
+// one, nor is a wrapped line that goes on from its number as a sentence would ("Chapter 12, and…",
+// "Chapter 3 of the book"). A heading with only a number may take
+// its name from the short line under it ("CHAPTER I." over "The Period"). Lines are read a
+// thousand a turn. A Project Gutenberg file is read between its START and END lines, so its
+// header and license aren't chapters. A part ("BOOK THE FIRST—RECALLED TO LIFE") names the
+// chapters after it, in a book whose chapters have headings of their own.
+const TXT_HEADING = /^(?:chap|book|part|act|scene|letter|stave|canto|section|vol|episode|lecture|lesson|appendix|essay|story|sermon|fit|sonnet|psalm)|^[IVXLC\d]+\s*[.:)]/i;
+async function parseTxt(text: string, pause: Pause): Promise<RawChapter[]> {
+  const start = text.indexOf('*** START OF'), end = text.lastIndexOf('*** END OF');
+  if (start >= 0 && end > start) text = text.slice(text.indexOf('\n', start) + 1, end);
+  const lines = text.split('\n');
   const marks: { index: number; length: number; title: string }[] = [];
-  for (let from = 0; from < text.length;) {
-    const nl = text.indexOf('\n', from + 65536), to = nl < 0 ? text.length : nl + 1;
-    for (const m of text.slice(from, to).matchAll(heading)) marks.push({ index: from + m.index!, length: m[0].length, title: m[1] });
-    from = to;
-    await pause();
+  const blank = (i: number) => i < 0 || i >= lines.length || !lines[i].trim();
+  for (let i = 0, at = 0; i < lines.length; at += lines[i].length + 1, i++) {
+    if (i % 1000 === 0) await pause();
+    const line = lines[i].trim();
+    if (!line || line.length > 120 || !TXT_HEADING.test(line) || !isHeadingLine(line)) continue;
+    const t = normalizeTitle(line), named = !!t.name;
+    if (named && (t.suspect || /^\p{Ll}/u.test(t.name!) || /^\S+\s*\S+?,/.test(line))) continue;
+    let title = line, length = lines[i].length + 1;
+    const below = lines[i + 1]?.trim() ?? '';
+    if (!named && below && below.length <= 80 && blank(i + 2) && !isHeadingLine(below)) { title = `${line} ${below}`; length += lines[i + 1].length + 1; }
+    marks.push({ index: at, length, title });
   }
+  // A contents list with a blank line between its entries reads as headings too: when the first
+  // heading comes again later, the ones before it were the contents. The book opens after them.
+  const key = (m: { title: string }) => { const t = normalizeTitle(m.title); return `${t.label ?? ''} ${t.n ?? t.display}`; };
+  const again = marks.findIndex((m, i) => i > 0 && key(m) === key(marks[0]));
+  let opening = 0;
+  if (again > 0) { opening = marks[again - 1].index + marks[again - 1].length; marks.splice(0, again); }
   if (marks.length < 2) return parts(text);
-  const out: Chapter[] = [];
-  const front = text.slice(0, marks[0].index);
+  // Parts, when the book also has chapters: Book, Part or Volume headings among others.
+  const labels = marks.map((m) => normalizeTitle(m.title).label);
+  const partLike = (l?: string) => l === 'Book' || l === 'Part' || l === 'Volume';
+  const hasParts = labels.some(partLike) && labels.some((l) => !partLike(l));
+  const out: RawChapter[] = [];
+  const front = text.slice(opening, marks[0].index);
   if (tidy(front).split(' ').length > 200) out.push({ title: 'Opening', text: front });
-  marks.forEach((m, i) => out.push({ title: tidy(m.title), text: text.slice(m.index + m.length, marks[i + 1]?.index ?? text.length) }));
+  let part: string | undefined;
+  marks.forEach((m, i) => {
+    const body = text.slice(m.index + m.length, marks[i + 1]?.index ?? text.length);
+    if (hasParts && partLike(labels[i])) {
+      part = tidy(m.title);
+      if (words(body) >= OPENING_WORDS) out.push({ title: part, text: body });
+      return;
+    }
+    out.push({ title: tidy(m.title), text: body, ...(part ? { part } : {}) });
+  });
   return out;
 }
 
@@ -164,10 +230,14 @@ const isMatterType = (types: string[]) => types.some((t) => MATTER_TYPES.has(t))
 export const isLegal = (text: string) => words(text) < 400 && /all rights reserved|\bISBN(?:-1[03])?:?\s*[\dX]/i.test(text);
 
 // A table of contents entry: where it points, if anywhere, and the entries under it.
-export type Entry<At> = { title: string; at?: At; children: Entry<At>[]; part?: boolean };
+// `within` is the title of the part ("Book Two: 1805") a lifted entry sat in.
+export type Entry<At> = { title: string; at?: At; children: Entry<At>[]; part?: boolean; within?: string };
 const PART = /^(?:part|book|volume|vol\.)\s*(?:[ivxlcdm]+\b|\d|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b)/i;
 
 const GROUP = /^(?:(?:front|back|end) ?matter|(?:table of )?contents)$/i;
+// A part ("Book the First—Recalled to Life" too), or an epilogue in parts of its own (War and
+// Peace's "FIRST EPILOGUE: 1813 - 20").
+const PART_HEADING = new RegExp(`${PART.source}|^(?:part|book|volume)\\s+the\\s+[a-z]+\\b|^(?:first|second|third|fourth)\\s+epilogue\\b`, 'i');
 
 // The level of a table of contents that holds the chapters: the top level, with parts ("Part One"),
 // front and back matter groups, unlinked headings and a lone entry wrapping the whole book replaced
@@ -177,7 +247,10 @@ export function chapterLevel<At>(entries: Entry<At>[]): Entry<At>[] {
     const content = entries.filter((e) => !e.part && !isMatterTitle(e.title));
     const lift = (e: Entry<At>) => e.children.length > 0 && (e.at === undefined || PART.test(e.title) || GROUP.test(e.title) || (content.length === 1 && content[0] === e));
     if (!entries.some(lift)) break;
-    entries = entries.flatMap((e) => (lift(e) ? [...(e.at === undefined ? [] : [{ ...e, children: [], part: true }]), ...e.children] : [e]));
+    // A part or an unlinked heading names the entries under it; a matter group or the book's wrapper doesn't.
+    const names = (e: Entry<At>) => (PART.test(e.title) || e.at === undefined) && !GROUP.test(e.title) && !!e.title;
+    entries = entries.flatMap((e) => (lift(e) ? [...(e.at === undefined ? [] : [{ ...e, children: [], part: true }]),
+      ...e.children.map((c) => (names(e) && !c.within ? { ...c, within: e.title } : c))] : [e]));
   }
   return entries;
 }
@@ -291,8 +364,15 @@ function unheaded(html: string, title: string): string {
   return html;
 }
 const headingOf = (html: string) => tidy(htmlText(html.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1] ?? ''));
+// The heading a chapter's page opens with, before any of its text; titles.ts prefers it to a table
+// of contents label that says less ("CHAPTER I" over "CHAPTER I. Down the Rabbit-Hole").
+// It's looked for in the page's opening only, so a long chapter costs no more than a short one.
+function leadingHeading(html: string): { text: string; end: number } | null {
+  const m = html.slice(0, 8000).match(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/i);
+  return m && tidy(htmlText(html.slice(0, m.index))) === '' ? { text: tidy(htmlText(m[2])), end: m.index! + m[0].length } : null;
+}
 
-async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
+async function parseEpub(zip: Zip, pause: Pause): Promise<RawBook> {
   // Images/fonts aren't needed for narration. Bound expansion before reading entries.
   let expanded = 0;
   const text = zip.entries.filter((e) => /\.(xml|opf|xhtml|html|htm|ncx)$/i.test(e.name));
@@ -367,7 +447,7 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
 
   // A run of a spine file outside the table of contents, titled by its first heading; null when it's
   // front or back matter.
-  const loose = (k: number, from: number, to: number, fallback: string): Chapter | null => {
+  const loose = (k: number, from: number, to: number, fallback: string): RawChapter | null => {
     const html = docs[k].html.slice(from, to);
     const heading = html.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i);
     const title = heading ? tidy(htmlText(heading[1])) : '';
@@ -376,7 +456,7 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
   };
 
   const bySpine = async () => {
-    const out: Chapter[] = [];
+    const out: RawChapter[] = [];
     for (let k = 0; k < docs.length; k++) {
       const d = docs[k];
       const c = d.linear ? loose(k, d.start, d.end, `Section ${out.length + 1}`) : null;
@@ -386,14 +466,14 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
     return out;
   };
 
-  const byToc = async (): Promise<Chapter[] | null> => {
+  const byToc = async (): Promise<RawChapter[] | null> => {
     const place = (entries: Entry<Target>[]): Entry<Spot>[] => entries
       .map((e) => ({ title: e.title, at: spot(e.at), children: place(e.children) }))
       .filter((e) => e.at || e.children.length);
     const list = chapterLevel(place(toc)).filter((e): e is Entry<Spot> & { at: Spot } => !!e.at)
       .sort((a, b) => a.at.k - b.at.k || a.at.at - b.at.at);
     if (new Set(list.map((e) => key(e.at))).size < 2) return null;
-    const out: Chapter[] = [];
+    const out: RawChapter[] = [];
     // Spine files before the first entry: an untitled prologue stays, title pages and the like don't.
     const first = list[0].at;
     for (let k = 0; k <= first.k; k++) {
@@ -402,14 +482,14 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
       if (c && words(c.text) >= OPENING_WORDS) out.push(c);
       await pause();
     }
-    let listed = 0;
+    let listed = 0, part: string | undefined;
     for (let i = 0; i < list.length; i++) {
       const e = list[i];
       await pause();
       const end = list[i + 1]?.at ?? { k: docs.length - 1, at: docs[docs.length - 1].end };
       let html = '';
       // Files between two entries continue the first one's chapter, unless they're front or back matter.
-      const follow: Chapter[] = [];
+      const follow: RawChapter[] = [];
       for (let k = e.at.k; k <= end.k; k++) {
         const d = docs[k], from = k === e.at.k ? e.at.at : d.start, to = k === end.k ? end.at : d.end;
         const alone = k > e.at.k && to > from && d.linear ? loose(k, from, to, '') : null;
@@ -417,7 +497,13 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
         if (to > from && (k === e.at.k || alone)) html += d.html.slice(from, to) + '\n';
       }
       const title = e.title || headingOf(html) || `Section ${out.length + 1}`;
-      const text = tidy(htmlText(unheaded(html, title)));
+      // The page's own heading names the chapter when its label says less (titles.ts: "CHAPTER I"
+      // over "CHAPTER I. Down the Rabbit-Hole"). Narration starts with the chapter's heading, so a
+      // page heading that says all the label does leaves the text.
+      const opened = unheaded(html, title), own = leadingHeading(html)?.text ?? '', said = norm(title);
+      const ownWords = new Set<string>(norm(own));
+      const lead = own && said.length && said.every((w) => ownWords.has(w)) ? leadingHeading(opened) : null;
+      const text = tidy(htmlText(lead && lead.text === own ? opened.slice(lead.end) : opened));
       // A first entry named after the book is its title page.
       const titlePage = listed === 0 && !e.part && !!bookTitle && norm(title).join(' ') === bookTitle && words(text) < 300;
       if (isMatterTitle(title) || matterAt(e.at) || isLegal(text) || titlePage) {
@@ -426,17 +512,24 @@ async function parseEpub(zip: Zip, pause: Pause): Promise<Chapter[]> {
         if (listed === 0) for (const c of follow) if (words(c.text) >= OPENING_WORDS) out.push({ title: c.title || 'Opening', text: c.text });
         continue;
       }
+      // A part names the chapters under it, and those listed after it until the next part (a book
+      // may list "BOOK ONE: 1805" or "FIRST EPILOGUE" beside its chapters rather than over them).
+      // A part over its chapters with little text of its own is only their heading; one beside them
+      // keeps what text it has (a poem opening a book of poems), as any entry does.
+      if (e.within) part = e.within;
+      if (e.part || PART_HEADING.test(title)) part = title;
       if (e.part && words(text) < OPENING_WORDS) continue;
-      out.push({ title, text });
+      out.push({ title, text, ...(part && part !== title ? { part } : {}), ...(own ? { own } : {}) });
       listed++;
     }
     return out;
   };
 
   const chapters = await byToc();
-  if (chapters && chapters.length >= 2) return chapters;
+  const named = tidy(htmlText(opf.match(/<dc:title\b[^>]*>([\s\S]*?)<\/dc:title>/i)?.[1] ?? ''));
+  if (chapters && chapters.length >= 2) return { chapters, bookTitle: named };
   const spine = await bySpine();
-  return chapters && chapters.length >= spine.length ? chapters : spine;
+  return { chapters: chapters && chapters.length >= spine.length ? chapters : spine, bookTitle: named };
 }
 
 // What an import says of itself: an EPUB's title, first author and cover image. A cover is read

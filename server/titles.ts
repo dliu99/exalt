@@ -1,6 +1,8 @@
-// A prototype, not yet wired into parsing (see titles.md): a chapter title as the book's table of
-// contents, headings or PDF outline gives it, read into what it says (a kind, the book's own label
-// word, a number and a name), and shown and narrated one consistent way across books.
+// A chapter title as the book's table of contents, headings or PDF outline gives it, read into what
+// it says (a kind, the book's own label word, a number and a name), and shown and narrated one
+// consistent way across books (see titles.md). book.ts keptChapters reads every book's titles with
+// it, on the phone (the app's import preview) and the server alike, so it stays cheap: a few
+// regular expressions a title, a turn a chapter.
 //
 // normalizeTitle reads one title on its own; normalizeChapters reads a whole book's, where some
 // rules need the others: page numbers every title ends in, bare numbers that count up, the book's
@@ -99,10 +101,11 @@ function casedRun(run: string): string {
 const SKIP = [
   /project gutenberg/i, /\b(?:licen[cs]e|copyright)\b/i, /^(?:detailed |detea?iled )?(?:table of )?contents\b/i, /\bcontents\.?$/i,
   /^(?:front |back )?cover$/i, /^(?:half[- ]?)?title(?: page)?$/i, /^index$/i, /^colophon$/i, /^imprint$/i,
-  /^list of (?:illustrations|figures|tables|maps|plates)\b/i, /^(?:also|other books|more books|books) by\b/i, /^praise for\b/i, /^about the publisher$/i,
+  /^list of (?:illustrations|figures|tables|maps|plates)\b/i, /^(?:also|other books|more books|books) by\b/i, /^praise for\b/i, /^about the (?:publisher|authors?)$/i,
+  /^(?:the )?dedication$/i, /^acknowledge?ments?$/i,
 ];
-const FRONT = /^(?:the |a )?(?:preface|foreword|fore-word|introduction|introductory|prologue|prolog|prelude|proem|dedication|epigraph|dramatis person(?:ae|æ)|persons represented|characters|etymology|extracts|author[’']s (?:note|preface)|translator[’']s (?:note|preface|introduction)|note to the .* edition|a note on the text|editor[’']s (?:note|preface))(?![\p{L}])/iu;
-const BACK = /^(?:the |an? )?(?:epilogue|epilog|afterword|after-word|postscript|addend(?:a|um)|appendix|appendices|glossary|endnotes|notes|bibliography|about the author|acknowledge?ments?|author[’']s afterword|l[’']envoi)(?![\p{L}])/iu;
+const FRONT = /^(?:the |a )?(?:preface|foreword|fore-word|introduction|introductory|prologue|prolog|prelude|proem|epigraph|dramatis person(?:ae|æ)|persons represented|characters|etymology|extracts|author[’']s (?:note|preface)|translator[’']s (?:note|preface|introduction)|note to the .* edition|a note on the text|editor[’']s (?:note|preface))(?![\p{L}])/iu;
+const BACK = /^(?:the |an? )?(?:epilogue|epilog|afterword|after-word|postscript|addend(?:a|um)|appendix|appendices|glossary|endnotes|notes|bibliography|author[’']s afterword|l[’']envoi)(?![\p{L}])/iu;
 
 const trimDecor = (s: string) => s
   .replace(/\s+/g, ' ')
@@ -191,23 +194,43 @@ export function normalizeTitle(raw: string): Title {
   return finish(p, kindOf(p, raw), raw);
 }
 
+/** Whether a line of a plain-text book is a chapter heading: the book's word and a number
+ * ("CHAPTER I.", "Letter 1", "BOOK the Second"), or a number before a name in capitals ("I. A
+ * SCANDAL IN BOHEMIA"). A sentence that only starts with "part" or "book" isn't one. */
+export function isHeadingLine(line: string): boolean {
+  const s = trimDecor(line);
+  if (!s || s.length > 120 || !/^[\p{Lu}\d]/u.test(s)) return false;
+  const p = parse(s);
+  if (p.label) return p.n !== undefined;
+  if (p.n === undefined || !p.name) return false;
+  const rest = s.replace(/^\S+\s*/, '');
+  const letters = rest.replace(/[^\p{L}]/gu, '');
+  return letters.length >= 3 && letters === letters.toUpperCase() && rest.split(' ').length <= 12;
+}
+
 export type ChapterIn = { title: string; heading?: string; part?: string; words?: number };
-export type ChapterOut = Title & { part?: Title };
+// `display` is the chapter list's line (with its part when the book repeats names: "Book 2 ·
+// Chapter 1"); `heading` is narrated before the text (its part's too, as a part begins).
+export type ChapterOut = Title & { part?: Title; heading: string };
+export type Pause = () => Promise<void> | void;
 
 const norm = (s: string) => (s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).join(' ');
+// A title page or Gutenberg header with this many words under it holds the book's opening.
+const LONG_OPENING = 1000;
 
-/** A whole book's titles. `bookTitle` is the EPUB's dc:title, for its title page. */
-export function normalizeChapters(chapters: ChapterIn[], bookTitle = ''): ChapterOut[] {
+/** A whole book's titles, a chapter a turn. `bookTitle` is the EPUB's dc:title, for its title page. */
+export async function normalizeChapters(chapters: ChapterIn[], bookTitle = '', pause: Pause = () => {}): Promise<ChapterOut[]> {
   // Page numbers every title ends in (a PDF outline or a scraped contents page): when most titles
   // end in a number and those numbers never go down, they're page numbers.
   const tails = chapters.map((c) => c.title.trim().match(/\s(\d{1,4})$/)?.[1]).map((d) => (d ? Number(d) : undefined));
   const ended = tails.filter((d) => d !== undefined) as number[];
   const pageNumbers = ended.length >= 3 && ended.length >= chapters.length * 0.6 && ended.every((d, i) => i === 0 || d >= ended[i - 1])
     && ended.some((d, i) => i > 0 && d - ended[i - 1] > 1);
-  const parsed = chapters.map((c) => {
+  const parsed: { c: ChapterIn; raw: string; p: Parsed }[] = [];
+  for (const c of chapters) {
     let raw = pageNumbers ? c.title.trim().replace(/\s+\d{1,4}$/, '') : c.title;
     let p = parse(raw);
-    // The chapter's own heading, when its label says less: the label has no name or the heading
+    // The chapter's own heading, when its label says less: the label has no name and the heading
     // names the same number, or the label is empty or is prose (too long, starts in lower case).
     if (c.heading) {
       const h = parse(c.heading);
@@ -215,23 +238,44 @@ export function normalizeChapters(chapters: ChapterIn[], bookTitle = ''): Chapte
       const labelPoor = !trimDecor(raw) || raw.length > 150 || /^\p{Ll}/u.test(trimDecor(raw));
       if ((sameNumber && !p.name && h.name && !h.caption) || (labelPoor && (h.name || h.n !== undefined))) { p = { ...h, caption: p.caption, weak: undefined }; raw = c.heading; }
     }
-    return { c, raw, p };
-  });
+    parsed.push({ c, raw, p });
+    await pause();
+  }
   // Bare and weakly numbered titles keep their numbers only when the book's count up (1, 2, 3 or
   // I, II, III); a lone "1984" or "3 Women" stays a name.
   const weak = parsed.filter((x) => x.p.weak);
   const counts = weak.length >= 2 && weak.every((x, i) => i === 0 || (x.p.n as number) > (weak[i - 1].p.n as number) || x.p.n === 1);
-  const book = norm(bookTitle);
-  return parsed.map(({ c, raw, p }, i) => {
+  // The book's title, and its main title before a subtitle ("On the Origin of Species" of "… By
+  // Means of Natural Selection / Or, …").
+  const books = [norm(bookTitle), norm(bookTitle.split(/\s*[:;/]\s*|\s+by\s+|,\s*or\b/i)[0])].filter(Boolean);
+  const out: ChapterOut[] = [];
+  for (let i = 0; i < parsed.length; i++) {
+    let { p } = parsed[i];
+    const { c, raw } = parsed[i];
     if (p.weak && !counts) p = { name: cleanName(trimDecor(raw)) };
     let kind = kindOf(p, raw);
-    // The book's own title as a chapter is its title page.
-    if (book && norm(raw) && (norm(raw) === book || (i < 3 && book.startsWith(norm(raw)) && norm(raw).length > 6))) kind = 'skip';
-    // A long run under a skipped title (a Gutenberg header the translator's introduction follows)
-    // is read as the book's opening rather than lost.
-    if (kind === 'skip' && /project gutenberg e-?book of/i.test(raw) && (c.words ?? 0) >= 1000 && i < 3) { kind = 'front'; p = { name: 'Opening' }; }
-    const out: ChapterOut = { ...finish(p, kind, raw), raw: c.title };
-    if (c.part) out.part = normalizeTitle(c.part);
-    return out;
-  });
+    // The book's own title as a chapter is its title page, as is Gutenberg's header. A long run
+    // under one (an editor's preface, a translator's introduction) is the book's opening, not lost.
+    const titlePage = i < 3 && books.includes(norm(raw));
+    if (titlePage) kind = 'skip';
+    if ((titlePage || /project gutenberg e-?book of/i.test(raw)) && i < 3 && (c.words ?? 0) >= LONG_OPENING) { kind = 'front'; p = { name: 'Opening' }; }
+    const t = { ...finish(p, kind, raw), raw: c.title };
+    out.push({ ...t, heading: t.spoken, ...(c.part ? { part: normalizeTitle(c.part) } : {}) });
+    await pause();
+  }
+  // A book whose numbered chapters repeat ("Chapter 1" in every book of War and Peace) shows each
+  // with its part, and a part's name is narrated as the part begins. Two poems named "To You"
+  // aren't a reason to.
+  const kept = out.filter((t) => t.kind !== 'skip');
+  const seen = new Set<string>();
+  const repeats = kept.some((t) => !t.name && seen.size === seen.add(t.display).size);
+  let lastPart = '';
+  for (const t of kept) {
+    if (!t.part) { lastPart = ''; continue; }
+    const short = t.part.label && t.part.n !== undefined ? `${t.part.label} ${t.part.n}` : t.part.display;
+    if (repeats) t.display = `${short} · ${t.display}`;
+    if (t.part.raw !== lastPart) t.heading = `${t.part.spoken} ${t.heading}`;
+    lastPart = t.part.raw;
+  }
+  return out;
 }

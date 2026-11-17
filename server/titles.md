@@ -1,6 +1,6 @@
-# Chapter titles across books: research and a prototype
+# Chapter titles across books
 
-`titles.ts` is a prototype and is not yet wired into parsing. It reads a chapter title, as a book's table of
+`titles.ts` reads a chapter title, as a book's table of
 contents, headings or PDF outline gives it, into `{kind, label, n, name}`. From that it builds one
 `display` for the chapter list and one `spoken` line, which is narrated before the text.
 
@@ -137,15 +137,36 @@ or where more than half the titles have no name, and ask it for a name, not a re
 | `THE FULL PROJECT GUTENBERG™ LICENSE` | *(skip)* | |
 | `part of his face, extending down past the` | *(unchanged, `suspect`)* | |
 
-## Open questions
+## Decided, and shipped
 
-1. **Captions.** Drop them, as the prototype does, or show them as a subtitle? They're the illustrator's
-   lines, not chapter names.
-2. **Unlabelled numbers.** Should bare `I`, `II`, `III` (Metamorphosis, Ulysses) show as "Chapter 1" or
-   "Part 1", or keep the roman numeral, "I"?
-3. **Front and back matter.** Narrate Preface, Introduction, Dedication and Acknowledgments? Today parsing
-   drops Acknowledgments and keeps Preface. The prototype only classifies them, and the caller decides.
-4. **Showing number and name.** One line ("4 · Loomings") or the name with a small "Chapter 4" above it?
-5. **Spoken titles.** Should the narrator say "Chapter 4" at all when the list already shows it?
-6. **Parse fixes.** Do the three parse fixes (the TXT heading regex, the Gutenberg license, carrying parts
-   through) ship with this, or separately?
+1. **Captions** are dropped.
+2. **A bare `I`, `II`** (Metamorphosis, Ulysses) shows as "Chapter 1".
+3. **Front and back matter.** Preface, Introduction and the like are narrated. Dedication,
+   Acknowledgments, About the Author, Gutenberg's license and header, and title and contents pages
+   are skipped. A Gutenberg header or title page with 1,000 or more words under it becomes "Opening".
+4. **A list row** shows the name, or "Chapter 4" when there's none. Each stored chapter keeps its parts
+   (`title_parts`: kind, label, n, name, part) so the UI can change later.
+5. **Narration** starts with the heading: "Chapter 4. Loomings." when the book uses a word like "Chapter",
+   the name alone for a bare-numbered book. A part's name is narrated as the part begins
+   ("Book 2. 1805. Chapter 1.").
+6. **The parse fixes ship too.**
+   - TXT headings must name a section and a number (`isHeadingLine`), so "part of…" and "book;" no longer
+     split chapters. A heading that goes on as a sentence ("Chapter 12, and…") is skipped too.
+   - TXT is read between Gutenberg's START and END lines. A contents list, recognised when its first
+     heading comes again, is passed over.
+   - Parts are carried through, whether nested over their chapters or listed beside them. When the
+     book's numbered chapters repeat, each list row shows its part: "Book 2 · Chapter 1".
+
+## How it's wired
+
+`book.ts` `keptChapters` reads every book's titles: the server's `parseBook` (EPUB, TXT, PDF) and the
+app's `readBook` (the on-device preview) both go through it, so the phone and the server get the same
+chapters. Each kept chapter has:
+
+- `title`, the list's line;
+- `heading`, what's narrated first (`partsOf` in `jobs.ts`);
+- `parts`, the structured title.
+
+`db.ts` stores `heading` and `title_parts` beside `title`. Chapters stored before this have neither and
+are narrated by their title, as before. The work runs a chapter per turn and searches only a page's
+opening for its heading, so a turn on the phone costs what it did before.

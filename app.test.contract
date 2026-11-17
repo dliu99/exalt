@@ -96,7 +96,7 @@ test "an audiobook lists its chapters: the first narrated, the others waiting fo
   reload
   clock +100
   clock data
-  expect text "now-playing" == "Chapter One: The Harbour"
+  expect text "now-playing" == "The Harbour"
   // Under the title and author: who narrates it. The sample has no named voice, so just the model.
   expect text "narrated-by" == "Narrated by Silence · ada"
   expect tree has "toggle"
@@ -123,7 +123,7 @@ test "Home's feed shows what others shared, and a tap on a cover plays it"
   expect tree has "player"
   expect state loaded == "1"
   expect state held == false
-  expect text "now-playing" == "Chapter One: The Harbour"
+  expect text "now-playing" == "The Harbour"
 
 test "signed out, a chapter's Generate opens the sheet, and closing it carries nothing on"
   at "/play/1"
@@ -174,7 +174,7 @@ test "at a chapter that isn't narrated the player stops and offers Generate, and
   clock +100
   clock data
   tap "audio" mediasession "nexttrack"
-  expect text "now-playing" == "Chapter Two: The River"
+  expect text "now-playing" == "The River"
   expect state held == true
   expect tree has "not-narrated"
   expect tree has "generate-current"
@@ -228,15 +228,15 @@ test "a narrated chapter in the list plays at a tap; one that isn't keeps its Ge
   at "/play/1"
   clock +100
   clock data
-  expect text "now-playing" == "Chapter One: The Harbour"
+  expect text "now-playing" == "The Harbour"
   tap "track-1"
   expect state track == 1
   expect state held == false
-  expect text "now-playing" == "Chapter Two: The River"
+  expect text "now-playing" == "The River"
   expect tree has "audio"
   tap "track-0"
   expect state track == 0
-  expect text "now-playing" == "Chapter One: The Harbour"
+  expect text "now-playing" == "The Harbour"
   expect tree has "generate-2"
   expect tree missing "generate-1"
 
@@ -328,7 +328,7 @@ test "a book imported by link is split into chapters; a link to a private addres
   clock +100
   clock data
   // grace's own audiobook of the same link is 2; nothing was made of the refused ones.
-  expect text "now-playing" == "Chapter One: The Harbour"
+  expect text "now-playing" == "The Harbour"
 
 // After the import above: lin's private import of the same link is audiobook 3. A private one
 // stays out of the feed; shared (with the right confirmed) it joins it, and made private, leaves.

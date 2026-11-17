@@ -2,22 +2,22 @@
 // those too), and PDF here, by its outline, else in 10-page parts. Ligatures are read as their
 // letters, including PDF ligature glyphs that pdf.js reads as stray letters.
 import { MAX_BOOK_BYTES, MAX_TEXT_CHARS } from './limits.ts';
-import { type Chapter, chapterLevel, type Entry, escapeRe, isLegal, isMatterTitle, keptChapters, norm, OPENING_WORDS, readChapters, tidy, unligate, words } from './book.ts';
+import { type Chapter, chapterLevel, type Entry, escapeRe, isLegal, isMatterTitle, keptChapters, norm, OPENING_WORDS, type RawChapter, readChapters, tidy, unligate, words } from './book.ts';
 
 export { bookMeta, type BookMeta, type Chapter } from './book.ts';
 
 export async function parseBook(name: string, bytes: Uint8Array): Promise<Chapter[]> {
   if (bytes.length > MAX_BOOK_BYTES) throw new Error('Book files must be under 50 MB.');
   const ext = name.toLowerCase().split('.').pop();
-  const chapters = ext === 'pdf' ? await parsePdf(bytes) : await readChapters(name, bytes);
-  if (!chapters) throw new Error('Upload an EPUB, PDF or TXT file.');
-  return await keptChapters(chapters, MAX_TEXT_CHARS);
+  const book = ext === 'pdf' ? { chapters: await parsePdf(bytes), bookTitle: '' } : await readChapters(name, bytes);
+  if (!book) throw new Error('Upload an EPUB, PDF or TXT file.');
+  return await keptChapters(book.chapters, MAX_TEXT_CHARS, undefined, book.bookTitle);
 }
 
 type Pdf = Awaited<ReturnType<typeof import('unpdf')['getDocumentProxy']>>;
 type OutlineNode = { title: string; dest: string | unknown[] | null; items?: OutlineNode[] };
 
-async function parsePdf(bytes: Uint8Array): Promise<Chapter[]> {
+async function parsePdf(bytes: Uint8Array): Promise<RawChapter[]> {
   const { extractText, getDocumentProxy } = await import('unpdf');
   const pdf = await getDocumentProxy(bytes);
   try {
@@ -88,7 +88,7 @@ function findTitle(text: string, title: string): { index: number; length: number
 
 // Chapters from the PDF's outline (bookmarks). Each starts where its title appears on its page, so a
 // chapter that begins mid-page splits there; otherwise at the top of its page.
-async function byOutline(pdf: Pdf, pages: string[]): Promise<Chapter[] | null> {
+async function byOutline(pdf: Pdf, pages: string[]): Promise<RawChapter[] | null> {
   const outline = (await pdf.getOutline().catch(() => null)) as OutlineNode[] | null;
   if (!outline?.length) return null;
   const pageOf = async (dest: OutlineNode['dest']): Promise<number | undefined> => {
@@ -116,14 +116,14 @@ async function byOutline(pdf: Pdf, pages: string[]): Promise<Chapter[] | null> {
     return { e, from, body: floor };
   });
 
-  const out: Chapter[] = [];
+  const out: RawChapter[] = [];
   // Pages before the first bookmark, without copyright and contents pages, open the book if they're long enough.
   const lead = pages.slice(0, list[0].at).filter((p) => !isLegal(p) && !/\bcontents\b/i.test(p.slice(0, 200)) && !/(?:\.\s*){6,}\d/.test(p)).join('\n');
   if (words(lead) >= OPENING_WORDS) out.push({ title: 'Opening', text: lead });
   marks.forEach(({ e, body }, i) => {
     const text = tidy(stream.slice(body, marks[i + 1]?.from ?? stream.length));
     if (isMatterTitle(e.title) || isLegal(text) || (e.part && words(text) < OPENING_WORDS)) return;
-    out.push({ title: e.title || `Section ${out.length + 1}`, text });
+    out.push({ title: e.title || `Section ${out.length + 1}`, text, ...(e.within ? { part: e.within } : {}) });
   });
   return out;
 }
@@ -145,7 +145,8 @@ export function chunks(text: string, max = 3000, first = max): string[] {
   return out;
 }
 
-// What a chapter is narrated in: its title read first, then its text, in parts that start at
+// What a chapter is narrated in: its heading read first ("Chapter 4. Loomings." from titles.ts; a
+// chapter kept before titles were read has only its title), then its text, in parts that start at
 // about 600 characters (some 40 seconds of speech) and grow to 3,000. The first part is back
 // from the provider in seconds, and plays while the larger ones are narrated.
-export const partsOf = (title: string, text: string) => chunks(`${title}. ${text}`, 3000, 600);
+export const partsOf = (heading: string, text: string) => chunks(`${/[.!?…]["'’”)]*$/.test(heading) ? heading : `${heading}.`} ${text}`, 3000, 600);

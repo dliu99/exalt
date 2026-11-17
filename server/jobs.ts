@@ -169,8 +169,9 @@ function validateChapters(chapters: Chapter[]) {
 }
 // `narrated` names the chapters that already have audio, by the title they were stored under.
 function insertChapters(id: number, chapters: Chapter[], narrated = new Map<number, string>()) {
-  const q = db.query('INSERT OR IGNORE INTO chapters (generation_id, idx, title, text, status) VALUES (?, ?, ?, ?, ?)');
-  chapters.forEach((c, i) => q.run(id, i, narrated.get(i) ?? c.title, narrated.has(i) ? null : c.text, narrated.has(i) ? 'ready' : 'idle'));
+  const q = db.query('INSERT OR IGNORE INTO chapters (generation_id, idx, title, text, status, heading, title_parts) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  chapters.forEach((c, i) => q.run(id, i, narrated.get(i) ?? c.title, narrated.has(i) ? null : c.text, narrated.has(i) ? 'ready' : 'idle',
+    c.heading ?? '', c.parts ? JSON.stringify(c.parts) : ''));
 }
 function queueChapter(id: number, idx: number, user: number | null) {
   db.query(`UPDATE chapters SET status = 'queued', requested_by = ?, requested_at = ?, parts_done = 0, parts_total = 0, error = ''
@@ -266,7 +267,7 @@ async function narrate(c: ChapterRow & { model: string; voice: string }) {
     db.query("UPDATE chapters SET status = 'unavailable' WHERE generation_id = ? AND idx = ?").run(id, idx);
     return;
   }
-  const parts = partsOf(c.title, text);
+  const parts = partsOf(c.heading || c.title, text);
   db.query("UPDATE chapters SET status = 'working', parts_done = 0, parts_total = ? WHERE generation_id = ? AND idx = ?").run(parts.length, id, idx);
   const path = join(SCRATCH_DIR, `${id}-${idx}.partial`);
   const file = await open(path, 'w');

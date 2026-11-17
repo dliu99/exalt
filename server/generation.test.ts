@@ -242,7 +242,7 @@ test('an import by link is split into chapters, only its first narrated; the sam
     expect(generation.status).toBe('ready');
     // The sample is three chapters: the first is narrated, the others wait to be asked for.
     expect(generation.chapters.map((c) => [c.title, c.status])).toEqual([
-      ['Chapter One: The Harbour', 'ready'], ['Chapter Two: The River', 'idle'], ['Chapter Three: The Sea', 'idle']]);
+      ['The Harbour', 'ready'], ['The River', 'idle'], ['The Sea', 'idle']]);
     expect([generation.done, generation.total, generation.owner, generation.mine, generation.limit]).toEqual([1, 3, true, 0, 3]);
     expect(generation.tracks).toHaveLength(1);
     expect(generation.chapters[0].src).toBe(generation.tracks[0].src);
@@ -338,7 +338,7 @@ test('an upload is split into chapters, and only its maker can delete it, audio 
     expect(made.status).toBe(202);
     const { id } = await made.json();
     const g = await settled(s, id, 'ada');
-    expect(g.chapters.map((c) => [c.title, c.status])).toEqual([['Chapter 1: Morning', 'ready'], ['Chapter 2: Noon', 'idle'], ['Chapter 3: Night', 'idle']]);
+    expect(g.chapters.map((c) => [c.title, c.status])).toEqual([['Morning', 'ready'], ['Noon', 'idle'], ['Night', 'idle']]);
     expect(g.owner).toBe(true);
     const file = join(s.dir, 'audio', String(id), '0.m4a');
     expect(existsSync(file)).toBe(true);
