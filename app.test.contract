@@ -110,6 +110,11 @@ test "an audiobook lists its chapters: the first narrated, the others waiting fo
 test "Home's feed shows what others shared, and a tap on a cover plays it"
   at "/home"
   size 390x844
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock data
   clock settle
   expect tree has "feed"
@@ -128,6 +133,11 @@ test "Home's feed shows what others shared, and a tap on a cover plays it"
 test "signed out, a chapter's Generate opens the sheet, and closing it carries nothing on"
   at "/play/1"
   size 420x1200
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   expect state pendingAuth == ""
@@ -142,6 +152,11 @@ test "signed out, a chapter's Generate opens the sheet, and closing it carries n
 
 test "the player's speed, pause, position and skips"
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   // Opened at its address it waits paused; a tap plays it, as a tap on a book would.
@@ -171,6 +186,11 @@ test "the player's speed, pause, position and skips"
 
 test "at a chapter that isn't narrated the player stops and offers Generate, and plays it once someone has"
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   tap "audio" mediasession "nexttrack"
@@ -194,6 +214,11 @@ test "at a chapter that isn't narrated the player stops and offers Generate, and
 test "leaving the player keeps it playing, in the dock's mini player, which pauses and opens it"
   size 390x844
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   // Opened at its address it waits paused; a tap plays it, as a tap on a book would.
@@ -226,6 +251,17 @@ test "leaving the player keeps it playing, in the dock's mini player, which paus
 
 test "a narrated chapter in the list plays at a tap; one that isn't keeps its Generate"
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
+  // Chapter two narrated, as a listener asked for it.
+  request POST "/generations/1/chapters/1" as grace
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   expect text "now-playing" == "The Harbour"
@@ -242,6 +278,17 @@ test "a narrated chapter in the list plays at a tap; one that isn't keeps its Ge
 
 test "the sleep timer counts while playing, holds with a pause, and pauses at its time or the chapter's end"
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
+  // Chapter two narrated, as a listener asked for it.
+  request POST "/generations/1/chapters/1" as grace
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   // Opened at its address it waits paused; a tap plays it, as a tap on a book would.
@@ -279,6 +326,17 @@ test "the sleep timer counts while playing, holds with a pause, and pauses at it
 // It narrates the third chapter, which the tests above keep waiting for Generate: after them.
 test "an audiobook downloads to the device, plays from there, and is removed again"
   at "/play/1"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  clock +1500 real
+  reload
+  clock +100
+  clock data
+  // Chapter two narrated, as a listener asked for it.
+  request POST "/generations/1/chapters/1" as grace
+  clock +1500 real
+  reload
+  clock +100
+  clock data
   clock +100
   clock data
   expect text "download-state" == "Listen offline"
@@ -319,7 +377,7 @@ test "an audiobook downloads to the device, plays from there, and is removed aga
 
 // Last: it adds an audiobook to the run's shared database.
 test "a book imported by link is split into chapters; a link to a private address is refused"
-  at "/play/2"
+  at "/play/1"
   request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2F127.0.0.1%2Fbook.epub" as ada expect 400
   request POST "/audiobooks?model=exalt%2Fsilence&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace expect 400
   request POST "/audiobooks?model=exalt%2Fsilence&rights=1&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as grace
@@ -327,13 +385,15 @@ test "a book imported by link is split into chapters; a link to a private addres
   reload
   clock +100
   clock data
-  // grace's own audiobook of the same link is 2; nothing was made of the refused ones.
+  // grace's audiobook of the link is 1; nothing was made of the refused ones.
   expect text "now-playing" == "The Harbour"
 
 // After the import above: lin's private import of the same link is audiobook 3. A private one
 // stays out of the feed; shared (with the right confirmed) it joins it, and made private, leaves.
 test "the feed has only what is shared: sharing needs the right confirmed, and Make Private takes it out"
   at "/home"
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as ada
+  request POST "/audiobooks?link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt&model=exalt%2Fsilence&rights=1" as grace
   request POST "/audiobooks?model=exalt%2Fsilence&public=0&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as lin
   clock +1500 real
   reload
