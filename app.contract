@@ -285,6 +285,7 @@ component App
   mutation nonce as shape Reply
   mutation signedIn as shape Reply refreshes account, library, places, audiobook
   mutation left as shape Reply refreshes account, library, places, audiobook
+  mutation deleted as shape Reply refreshes account, library, browse, places, audiobook then afterDeleted
   derive signInError = match signedIn { case some(r) => r.error, case none => "" }
 
   // Library: the person's audiobooks, newest first, and where they are in each.
@@ -482,6 +483,21 @@ component App
     send left = signOut()
     // A sheet still up is for the session that is ending: its answer is dropped.
     send signedIn = idle()
+  // Deleting the account asks first: everything it made goes, for good.
+  action askDeleteAccount
+    showModal("delete-account-alert")
+  action deleteAccount
+    send deleted = deleteAccount()
+    send signedIn = idle()
+  // Gone, the person is signed out, and what was playing stops: it may have been theirs.
+  action afterDeleted
+    let said = match deleted { case some(r) => r.error, case none => "" }
+    refused(said)
+    if said == ""
+      held = true
+      loaded = ""
+      if playerOpen
+        nav = back(nav)
   // A session the server dropped shows as signed out (app.ts forgets it), so the account follows.
   action pull
     if account.signedIn
@@ -1084,6 +1100,9 @@ component App
                 button press=signOut destructive=true popovertarget="account-menu" popovertargetaction="hide" testId="home-sign-out"
                   image "symbol:sign-out"
                   text "Sign Out"
+                button press=askDeleteAccount destructive=true popovertarget="account-menu" popovertargetaction="hide" testId="home-delete-account"
+                  image "symbol:delete"
+                  text "Delete Account"
             scroll id="library-shelf" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width="47.5rem" box-sizing="border-box" padding=(wide ? "120px 40px 140px" : "calc(env(safe-area-inset-top) + 76px) 24px 140px")
                 // The person's own shelf: signed out, it shows only while nothing is shared.
@@ -1495,6 +1514,12 @@ component App
         button press=remove destructive=true commandfor="remove-alert" command="close" testId="remove-confirm"
           text "Delete"
         button commandfor="remove-alert" command="close" testId="remove-cancel"
+          text "Cancel"
+      dialog id="delete-account-alert" role="alertdialog" aria-label="Delete Your Account?"
+        text "Your account and every audiobook you made, shared ones too, are deleted for good."
+        button press=deleteAccount destructive=true commandfor="delete-account-alert" command="close" testId="delete-account-confirm"
+          text "Delete Account"
+        button commandfor="delete-account-alert" command="close" testId="delete-account-cancel"
           text "Cancel"
       dialog id="share-alert" role="alertdialog" aria-label="Share Publicly?"
         text "Anyone on Exalt can listen to it. Only share books you have the right to."

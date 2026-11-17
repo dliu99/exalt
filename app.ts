@@ -219,6 +219,26 @@ async function signOut(store: Store) {
   return { ok: true, error: '' };
 }
 
+// Deleting the account (DELETE /me): everything it made, on the server; this device forgets it too.
+async function deleteAccount(store: Store): Promise<Reply> {
+  if (!session(store)) return { ok: false, error: SIGN_IN_AGAIN };
+  try {
+    const res = await fetch(`${API}/me`, { method: 'DELETE', exactTimeout: 30000, headers: bearer(store) });
+    // An expired session can't say whose account it was: nothing was deleted, so sign in and ask again.
+    if (res.status === 401) {
+      store.forget(SESSION);
+      return { ok: false, error: 'Sign in again to delete your account.' };
+    }
+    if (!res.ok) return { ok: false, error: await refusal(res) };
+  } catch {
+    return { ok: false, error: UNREACHABLE };
+  }
+  store.forget(SESSION);
+  store.forget(PLACES);
+  await preventSilentAccess().catch(() => {});
+  return { ok: true, error: '' };
+}
+
 async function get(path: string, timeout = 15000, headers: Record<string, string> = {}): Promise<unknown> {
   const res = await fetch(`${API}${path}`, { exactTimeout: timeout, headers });
   const body = await res.json().catch(() => ({}));
@@ -347,6 +367,7 @@ const sources: Sources = {
     : Promise.all([identityNonce(), googleNative.session(store)]).then(() => ({ ok: true, error: '' }), () => ({ ok: true, error: '' }))),
   signInWith: ([name], store) => signInWith(store, name === 'apple' ? 'apple' : 'google'),
   signOut: (_a, store) => signOut(store),
+  deleteAccount: (_a, store) => deleteAccount(store),
   idle: async () => ({ ok: true, error: '' }),
   loadPlaces: async (_a, store) => placesEverywhere(store),
   // Keeps the place, unless the book is finished (the last chapter, within its last half minute).

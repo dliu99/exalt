@@ -360,3 +360,31 @@ test('an upload is split into chapters, and only its maker can delete it, audio 
     expect((await s.call('DELETE', `/generations/${id}`, 'ada')).status).toBe(404);
   } finally { await s.stop(); }
 }, 15000);
+
+test('deleting an account removes what it made and where it was, and leaves everyone else’s', async () => {
+  const s = await start();
+  try {
+    const text = 'The light moves slowly over the water and the town wakes, turns, and settles again by evening. '.repeat(3);
+    const make = async (who: string) => (await s.call('POST', `/audiobooks?model=exalt%2Fsilence&rights=1&public=1&name=${who}.txt`, who, text).then((r) => r.json())).id as string;
+    const mine = await make('ada'), theirs = await make('grace');
+    await settled(s, mine, 'ada');
+    await settled(s, theirs, 'grace');
+    const place = JSON.stringify({ track: 0, tracks: 1, time: 1, duration: 2, at: Date.now() });
+    expect((await s.call('PUT', `/me/places/${theirs}`, 'ada', place)).status).toBe(200);
+    const ada = userId(s.dir, 'ada');
+    const file = join(s.dir, 'audio', mine, '0.m4a');
+    expect(existsSync(file)).toBe(true);
+
+    expect((await s.call('DELETE', '/me')).status).toBe(401);
+    const gone = await s.call('DELETE', '/me', 'ada');
+    expect(await gone.json()).toEqual({ ok: true });
+
+    expect((await s.call('GET', `/generations/${mine}`)).status).toBe(404);
+    expect(existsSync(file)).toBe(false);
+    expect((await s.call('GET', `/generations/${theirs}`)).status).toBe(200);
+    const db = new Database(join(s.dir, 'db.sqlite'));
+    for (const [table, column] of [['users', 'id'], ['sessions', 'user_id'], ['places', 'user_id'], ['generations', 'user_id'], ['chapters', 'requested_by']])
+      expect(db.query(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = ?`).get(ada)).toEqual({ n: 0 });
+    db.close();
+  } finally { await s.stop(); }
+}, 15000);
