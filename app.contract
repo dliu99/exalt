@@ -1206,7 +1206,7 @@ component App
                           text c.title font-size="0.9375rem" color="light-dark(#14171f, #14171f)" line-clamp=1
                           if c.opening != ""
                             text c.opening font-size="0.8125rem" line-height=1.35 color="light-dark(#8a8f9c, #8a8f9c)" line-clamp=1
-                        text `${timeText(minutesOf(c.words))} · ${pagesText(c.words)}` font-size="0.75rem" color="light-dark(#8a8f9c, #8a8f9c)" font-variant-numeric="tabular-nums" flex-shrink=0 padding-top=3
+                        text timeText(minutesOf(c.words)) font-size="0.75rem" color="light-dark(#8a8f9c, #8a8f9c)" font-variant-numeric="tabular-nums" flex-shrink=0 padding-top=3
                   // Sharing, quiet and off unless turned on; on, it asks for the right to share first.
                   column width="100%" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))" padding-top=6 testId="add-share"
                     row align-items="center" justify-content="space-between" gap=16 min-height=48
