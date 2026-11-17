@@ -74,7 +74,8 @@ test('an import is narrated, shared in Browse with its cover, kept private on si
     const { id, ok } = await made.json();
     expect(ok).toBe(true);
     const generation = await finished(id);
-    expect(generation).toMatchObject({ id, title: 'A Quiet Harbour', author: 'Ada Lovelace', voice: 'Reader', public: true, status: 'ready', done: 1, total: 1, active: 0, owner: false, signedIn: false });
+    // Narrated by its voice, with the model's shown name.
+    expect(generation).toMatchObject({ id, title: 'A Quiet Harbour', author: 'Ada Lovelace', voice: 'Reader', voiceName: 'Reader', model: 'Silence', public: true, status: 'ready', done: 1, total: 1, active: 0, owner: false, signedIn: false });
     expect(generation.chapters).toEqual([{ idx: 0, title: 'The Harbour', status: 'ready', error: '', src: generation.tracks[0].src, progress: 1 }]);
     expect(generation.cover).toMatch(/^\/covers\/up-[0-9a-f]{16}\.png$/);
     expect(generation.tracks).toHaveLength(1);
@@ -117,7 +118,7 @@ test('an import is narrated, shared in Browse with its cover, kept private on si
     const privateId = (await secret.json()).id as string;
     expect((await get(`/generations/${privateId}`)).status).toBe(404);
     const own = await finished(privateId, token);
-    expect(own).toMatchObject({ title: 'Field Notes', author: '', cover: '', public: false, status: 'ready' });
+    expect(own).toMatchObject({ title: 'Field Notes', author: '', cover: '', public: false, status: 'ready', voiceName: '', model: 'Silence' });
     expect(await get('/browse').then((r) => r.json())).toHaveLength(1);
     expect(own.owner).toBe(true);
     const signedSrc = own.tracks[0].src as string;
