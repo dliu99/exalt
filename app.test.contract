@@ -22,6 +22,35 @@ test "below the fold, the lander says what Exalt is"
   expect tree missing "wordmark"
   expect tree missing "enter"
 
+// The site follows the server: the offline one keeps no accounts, so nothing is gated and Home opens
+// at its address, signed out. (The app's gate is the next test, which runs only on a phone.)
+test "on the site, the door follows the server: signed out, Home opens"
+  at "/home"
+  clock data
+  clock settle
+  expect state app.ok == false
+  expect state needsAccount == false
+  expect state gated == false
+  expect state barred == false
+  expect tree has "library-empty"
+  expect tree missing "door"
+
+// In the app nothing opens without an account: a link to Home, Add or a book lands on the door, and
+// Back can't leave it. isApp() is false in a browser, so the web run skips this.
+test "in the app, signed out, every screen is the door" on ios, android
+  at "/import"
+  clock data
+  clock settle
+  expect state app.ok == true
+  expect state gated == true
+  expect state barred == false
+  expect tree has "door-start"
+  expect disabled "door-no-back"
+  back
+  clock settle
+  expect tree has "door-start"
+  expect state barred == false
+
 test "an empty library is blank covers and a +; signed out, the + asks to sign in first"
   at "/home"
   clock data
