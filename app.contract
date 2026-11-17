@@ -265,7 +265,8 @@ component App
   derive needsAccount = app.ok or (door.ok and identities.providers.google.active)
   derive gated = needsAccount and not account.signedIn
   // On a phone the door is a plain screen of its own: no painting, no wordmark.
-  derive phoneDoor = gated and not wide
+  // The door, its painting, line and sign-in sheet (Apple and Google), on any app; a wide browser keeps the lander.
+  derive phoneDoor = gated and (not wide or app.ok)
   // The account: the provider's buttons sign in, with a nonce fetched before the press.
   resource account = currentAccount() as shape Account else empty(signedIn=false, name="")
   resource identities = getIdentityCapabilities() as shape IdentityCapabilities
@@ -303,10 +304,9 @@ component App
   state importAuthor = ""
   state model = ""
   state voice = ""
-  // An import is private unless the person turns sharing on in Add a Book, and sharing asks them
-  // to confirm the right to (the server refuses it otherwise). Off by default: Generate stays one
-  // tap, and nothing goes public by an unread switch or a reflexive tick of the rights box.
-  state share = false
+  // An import is shared by default, so the feed on Home fills; sharing asks the person to confirm
+  // the right to (the server refuses it otherwise), and they can turn it off in Add a Book.
+  state share = true
   state rights = false
   state refusal = ""
   mutation imported as shape Imported refreshes library, browse then afterImport
@@ -567,8 +567,8 @@ component App
     importTitle = ""
     importAuthor = ""
     refusal = ""
-    // The right to share is confirmed for a book, so another starts private again.
-    share = false
+    // The right to share is confirmed for a book: another starts shared, unconfirmed.
+    share = true
     rights = false
   action takeLink
     if link.trim().startsWith("https://")
@@ -629,7 +629,7 @@ component App
       importTitle = ""
       importAuthor = ""
       linkTaken = ""
-      share = false
+      share = true
       rights = false
       // The new audiobook opens at once: its chapters, narrating.
       let made = match imported { case some(r) => r.gen, case none => "" }

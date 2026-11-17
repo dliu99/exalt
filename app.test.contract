@@ -62,11 +62,11 @@ test "an empty library is blank covers and a +; signed out, the + asks to sign i
   expect tree has "account-sheet"
   expect state pendingAuth == "import"
 
-test "an import starts private: sharing is turned on in Add a Book, and asks for the right to share"
+test "an import starts shared, and asks for the right to share before Generate"
   at "/import"
   clock data
   clock settle
-  expect state share == false
+  expect state share == true
   expect state rights == false
 
 test "Add a Book is a box to upload into, Paste link, Z-Library and LibGen; nothing else until a book is chosen"
