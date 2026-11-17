@@ -76,7 +76,7 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
     // An EPUB: its metadata, its cover inline, its chapter titles in order.
     expect(await preview({ name: 'upload.epub' }, epub()).then((r) => r.json())).toEqual({ ok: true, error: '', title: 'The Lantern Keeper',
       author: 'Mara Ellison', cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: ['Chapter One', 'Chapter Two'],
-      token: expect.stringMatching(/^[\w-]{24}$/) });
+      token: expect.stringMatching(/^[\w-]{24}$/), words: expect.any(Number) });
 
     // A PDF: named by its file, no cover, its pages in parts.
     const fromPdf = await preview({ name: 'Notes on Tides.pdf' }, pdf()).then((r) => r.json());
@@ -86,7 +86,7 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
     // A link (the offline server's sample book).
     expect(await preview({ link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json())).toEqual({ ok: true, error: '',
       title: 'A Quiet Harbour', author: '', cover: '', chapters: ['Chapter One: The Harbour', 'Chapter Two: The River', 'Chapter Three: The Sea'],
-      token: expect.any(String) });
+      token: expect.any(String), words: expect.any(Number) });
 
     // Not a book, or a link refused: ok false, and why.
     const notBook = await preview({ name: 'notes.docx' }, strToU8('not a book'));
