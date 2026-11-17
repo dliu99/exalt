@@ -74,7 +74,8 @@ test('an import is narrated, shared in Browse with its cover, kept private on si
     const { id, ok } = await made.json();
     expect(ok).toBe(true);
     const generation = await finished(id);
-    expect(generation).toMatchObject({ id, title: 'A Quiet Harbour', author: 'Ada Lovelace', voice: 'Reader', public: true, status: 'ready', done: 1, total: 1, active: 0, owner: false, signedIn: false });
+    // Narrated by its voice, with the model's shown name.
+    expect(generation).toMatchObject({ id, title: 'A Quiet Harbour', author: 'Ada Lovelace', voice: 'Reader', voiceName: 'Reader', model: 'Silence', public: true, status: 'ready', done: 1, total: 1, active: 0, owner: false, signedIn: false });
     expect(generation.chapters).toEqual([{ idx: 0, title: 'The Harbour', status: 'ready', error: '', src: generation.tracks[0].src, progress: 1 }]);
     expect(generation.cover).toMatch(/^\/covers\/up-[0-9a-f]{16}\.png$/);
     expect(generation.tracks).toHaveLength(1);
@@ -117,7 +118,7 @@ test('an import is narrated, shared in Browse with its cover, kept private on si
     const privateId = (await secret.json()).id as string;
     expect((await get(`/generations/${privateId}`)).status).toBe(404);
     const own = await finished(privateId, token);
-    expect(own).toMatchObject({ title: 'Field Notes', author: '', cover: '', public: false, status: 'ready' });
+    expect(own).toMatchObject({ title: 'Field Notes', author: '', cover: '', public: false, status: 'ready', voiceName: '', model: 'Silence' });
     expect(await get('/browse').then((r) => r.json())).toHaveLength(1);
     expect(own.owner).toBe(true);
     const signedSrc = own.tracks[0].src as string;
@@ -241,7 +242,7 @@ test('an import by link is split into chapters, only its first narrated; the sam
     expect(generation.status).toBe('ready');
     // The sample is three chapters: the first is narrated, the others wait to be asked for.
     expect(generation.chapters.map((c) => [c.title, c.status])).toEqual([
-      ['Chapter One: The Harbour', 'ready'], ['Chapter Two: The River', 'idle'], ['Chapter Three: The Sea', 'idle']]);
+      ['The Harbour', 'ready'], ['The River', 'idle'], ['The Sea', 'idle']]);
     expect([generation.done, generation.total, generation.owner, generation.mine, generation.limit]).toEqual([1, 3, true, 0, 3]);
     expect(generation.tracks).toHaveLength(1);
     expect(generation.chapters[0].src).toBe(generation.tracks[0].src);
@@ -337,7 +338,7 @@ test('an upload is split into chapters, and only its maker can delete it, audio 
     expect(made.status).toBe(202);
     const { id } = await made.json();
     const g = await settled(s, id, 'ada');
-    expect(g.chapters.map((c) => [c.title, c.status])).toEqual([['Chapter 1: Morning', 'ready'], ['Chapter 2: Noon', 'idle'], ['Chapter 3: Night', 'idle']]);
+    expect(g.chapters.map((c) => [c.title, c.status])).toEqual([['Morning', 'ready'], ['Noon', 'idle'], ['Night', 'idle']]);
     expect(g.owner).toBe(true);
     const file = join(s.dir, 'audio', String(id), '0.m4a');
     expect(existsSync(file)).toBe(true);

@@ -2,6 +2,7 @@ import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.t
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
+import { glance, readBook, type Glance } from './server/book.ts';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -13,6 +14,8 @@ const SESSION = 'exalt.session';
 const PLACES = 'exalt.places';
 const VOICE = 'exalt.voice';
 const GOOGLE_NATIVE = 'exalt.google';
+// Set when a developer's session (DEV_SIGN_IN) signs out: the door stays shut until a sign-in button is pressed.
+const DEV_OUT = 'exalt.dev-out';
 // Downloaded chapters, a folder per audiobook: `<idx>.<ext>` beside `book.json`, the audiobook as it was.
 const OFFLINE = 'app:/cache/offline';
 // Sign in with Apple's web client (a Services ID whose return URL is ${API}/sign-in/return).
@@ -22,7 +25,7 @@ const APP_CALLBACK = 'app.exalt.audiobooks:/signed-in';
 // The iOS client's callback: its "iOS URL scheme" in Google's console, the reversed client ID.
 const GOOGLE_IOS_URL_SCHEME: string = import.meta.env.GOOGLE_IOS_URL_SCHEME ?? 'com.googleusercontent.apps.exalt-ios';
 const GOOGLE_IOS_CALLBACK = `${GOOGLE_IOS_URL_SCHEME}:/oauth2redirect`;
-export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
+export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`, `secret.keep ${DEV_OUT}`,
   // Downloads, and the notice that a chapter asked for is narrated.
   `fs.read ${OFFLINE}`, `fs.write ${OFFLINE}`, 'device.notifications purpose.notifications',
   `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`,
@@ -32,13 +35,51 @@ export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.ke
   // …and with Apple through Apple's web sign-in in the same sheet, answered by the server.
   'auth.session https://appleid.apple.com', `auth.callback ${APP_CALLBACK}`].join('\n');
 
-type Reply = Result<'importBook'>;
+type Reply = { ok: boolean; error: string };
+// What an import answers: a Reply, and the new audiobook's id (`gen`; empty on failure), to open its player.
+type Imported = Result<'importBook'>;
+// What a picked file or a pasted link is, before it is imported (previewImport).
+type ImportPreview = Result<'previewImport'>;
+// About how many words a book's chapters hold, from their length (an English word and its space
+// average about six characters): enough for a reading time and a page count, without a pass over
+// the text that the phone's interpreter would pay for.
+const wordsIn = (chapters: { text: string }[]) => Math.round(chapters.reduce((n, c) => n + c.text.length, 0) / 6);
+// A preview's cover goes inline as a data: URL; the app's image takes one up to 1 MiB, base64 included.
+const PREVIEW_COVER_BYTES = 700 * 1024;
+// The most storage.fs.readFile answers; a picked book past it is previewed by the server.
+const LOCAL_READ_BYTES = 16 * 1024 * 1024;
+const COVER_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' } as const;
+// A turn of the data module has a budget (100 ms on an interpreter): the long reads below end theirs
+// as they go, and go on in a new one.
+const nextTurn = () => scheduler.yield();
+// Each chapter at a glance (its opening line and length), a turn ended every few dozen chapters
+// so a long book stays within a turn's budget on the phone's interpreter.
+async function glances(chapters: { title: string; text: string }[]): Promise<Glance[]> {
+  const out: Glance[] = [];
+  for (const [i, c] of chapters.entries()) {
+    if (i > 0 && i % 48 === 0) await nextTurn();
+    out.push(glance(c));
+  }
+  return out;
+}
+// Base64 a few slices a turn: each slice a multiple of three bytes, so the pieces join as one.
+async function base64(bytes: Uint8Array): Promise<string> {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3 * 8192) {
+    const slice = bytes.subarray(i, i + 3 * 8192);
+    let bin = '';
+    for (let j = 0; j < slice.length; j += 0x2000) bin += String.fromCharCode(...slice.subarray(j, j + 0x2000));
+    out += btoa(bin);
+    if (i % (3 * 8192 * 4) === 0) await nextTurn();
+  }
+  return out;
+}
 type Audiobook = Result<'loadAudiobook'>;
 type Kind = { kind?: string; code?: string };
 
 // The session the server answered at sign-in: its bearer token and the name to show. The view
 // sees only whether there is one and the name.
-type Session = { token: string; name: string };
+type Session = { token: string; name: string; dev?: boolean };
 const session = (store: Store): Session | null => {
   try { return JSON.parse(store.get(SESSION) ?? 'null'); } catch { return null; }
 };
@@ -126,7 +167,19 @@ async function signInApple(store: Store) {
   }
 }
 
+// A loopback server with DEV_SIGN_IN=1 signs a developer in with no provider; anywhere else the route is 404.
+async function devSignIn(store: Store) {
+  const res = await fetch(`${API}/sign-in/dev`, { method: 'POST', exactTimeout: 4000 }).catch(() => null);
+  const done = res?.ok ? ((await res.json().catch(() => ({}))) as Record<string, unknown>) : null;
+  if (!done?.ok) return false;
+  store.forget(DEV_OUT);
+  store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || 'Developer'), dev: true }));
+  return true;
+}
+
 async function signInWith(store: Store, name: 'google' | 'apple') {
+  // A developer who signed out comes back in through the door's button, as a person would.
+  if (store.get(DEV_OUT) && await devSignIn(store)) return { ok: true, error: '' };
   if (!onWeb()) return name === 'apple' ? signInApple(store) : signInNative(store);
   if (name === 'apple') return { ok: false, error: '' };
   const asked = ready;
@@ -157,6 +210,8 @@ async function signInWith(store: Store, name: 'google' | 'apple') {
 
 async function signOut(store: Store) {
   const headers = bearer(store);
+  // A developer's session would sign straight back in on the next look; it waits for the door's button.
+  if (session(store)?.dev) store.set(DEV_OUT, '1');
   store.forget(SESSION);
   // The next sign-in shows the provider's sheet rather than signing straight back in.
   await preventSilentAccess().catch(() => {});
@@ -298,16 +353,12 @@ async function placesEverywhere(store: Store): Promise<Place[]> {
 // models); empty until they choose one.
 type Pref = Result<'loadVoicePref'>;
 const NO_VOICE: Pref = { id: '', title: '', cover: '' };
-const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: '', voice: '', public: false,
+const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: '', voice: '', voiceName: '', model: '', public: false,
   status: '', done: 0, total: 0, active: 0, error: '', chapters: [], mine: 0, limit: 0, owner: false };
 
 const sources: Sources = {
   currentAccount: async (_a, store) => {
-    if (!session(store)) {
-      const res = await fetch(`${API}/sign-in/dev`, { method: 'POST', exactTimeout: 4000 }).catch(() => null);
-      const done = res?.ok ? ((await res.json().catch(() => ({}))) as Record<string, unknown>) : null;
-      if (done?.ok) store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || 'Developer') }));
-    }
+    if (!session(store) && !store.get(DEV_OUT)) await devSignIn(store);
     const s = session(store);
     return { signedIn: s != null, name: s?.name ?? '' };
   },
@@ -351,6 +402,10 @@ const sources: Sources = {
   })),
   loadGreats: async () => greats.map(([isbn, title, author]) => ({ id: isbn, title, author, cover: `assets/covers/${isbn}.jpg` })),
   loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
+  // Everyone's shared, finished audiobooks, newest first (Home's feed); `q` narrows to a title or author.
+  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
+    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+  })),
   // The signed-in person's audiobooks, newest first, finished or not; nothing when signed out.
   loadLibrary: async (_a, store) => {
     if (!session(store)) return [];
@@ -367,10 +422,6 @@ const sources: Sources = {
       public: g.public === true, voice: str(g.voice),
     }));
   },
-  // Everyone's shared, finished audiobooks, newest first; `q` narrows to a title or author.
-  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
-    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
-  })),
   // One audiobook to play: a shared one, or the person's own private one (hence the session), its
   // chapters, and how many chapters this listener has narrating (of how many at once). Out of
   // reach, a downloaded one answers with the copy kept beside its chapters.
@@ -383,6 +434,8 @@ const sources: Sources = {
     if (!res.ok) throw new Error(str(g.error) || `The server answered ${res.status}.`);
     return {
       id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+      // Who narrates it ("" for the model's own voice) and the model's shown name: "Narrated by Ada (Fish S2.1 Pro)".
+      voiceName: str(g.voiceName), model: str(g.model),
       public: g.public === true, status: str(g.status), done: Number(g.done) || 0, total: Number(g.total) || 0,
       active: Number(g.active) || 0, error: str(g.error), mine: Number(g.mine) || 0, limit: Number(g.limit) || 0, owner: g.owner === true,
       chapters: ((g.chapters ?? []) as Record<string, unknown>[]).map((c) => ({ idx: Number(c.idx) || 0, title: str(c.title), src: abs(str(c.src)),
@@ -403,24 +456,75 @@ const sources: Sources = {
       return { ok: false, error: UNREACHABLE };
     }
   },
-  // An import: the picked file's bytes go up as the request body, or a pasted link (`link`) the
-  // server downloads itself; what to make of them in the query.
-  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights], store, storage): Promise<Reply> => {
-    if (!session(store)) return { ok: false, error: 'Sign in to import a book.' };
+  // What a picked file (`path`, named `name`) or a pasted `link` is, before it is imported: its
+  // title, author, cover (a data: URL, or "") and chapter titles. A picked EPUB or TXT of up to
+  // 16 MiB is read here, as the server reads it (server/book.ts); a PDF, a larger file or a link goes
+  // to the server, which keeps what it read for Generate (`token`).
+  previewImport: async ([path, name, link], store, storage): Promise<ImportPreview> => {
+    const none = (error: string): ImportPreview => ({ ok: false, error, title: '', author: '', cover: '', chapters: [], token: '', words: 0 });
+    // Nothing picked or pasted yet: nothing to ask.
+    if (!path && !link) return none('');
     try {
-      const bytes = link ? undefined : await storage.fs.readFile(path);
-      const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0', ...(link ? { link } : {}) });
-      const res = await fetch(`${API}/audiobooks?${query}`, {
-        method: 'POST', body: bytes, exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+      // readFile answers at most 16 MiB: a larger book goes to the server, from disk (below).
+      const size = !link && /\.(epub|txt)$/i.test(name) ? await storage.fs.stat(path).then((st) => st.size, () => -1) : -1;
+      if (size >= 0 && size <= LOCAL_READ_BYTES) {
+        const read = await storage.fs.readFile(path);
+        const bytes = read instanceof Uint8Array ? read : new Uint8Array(read);
+        try {
+          // The zip's directory read here, the entries the book needs inflated natively, a turn ended
+          // between files and chapters (server/book.ts).
+          const { chapters, meta } = await readBook(name, bytes, nextTurn);
+          const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${await base64(meta.cover.bytes)}` : '';
+          return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
+            chapters: await glances(chapters), token: '', words: wordsIn(chapters) };
+        } catch (e) { return none(String((e as Error)?.message ?? e)); }
+      }
+      const query = new URLSearchParams(link ? { link } : { name });
+      const res = await fetch(`${API}/audiobooks/preview?${query}`, {
+        method: 'POST', exactTimeout: link ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+        ...(link ? {} : { exactBodyFrom: path }),
       });
       if (res.status === 401) {
         store.forget(SESSION);
-        return { ok: false, error: 'Sign in again to import a book.' };
+        return none('Sign in again to import a book.');
       }
-      return res.ok ? { ok: true, error: '' } : { ok: false, error: await refusal(res) };
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string; words?: number };
+      if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
+      return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
+        chapters: ((body.chapters ?? []) as Partial<Glance>[]).map((c) => ({ title: String(c.title ?? ''), opening: String(c.opening ?? ''), words: Number(c.words) || 0 })),
+        token: String(body.token ?? ''), words: Number(body.words) || 0 };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
-      return { ok: false, error: UNREACHABLE };
+      return none(UNREACHABLE);
+    }
+  },
+  // An import: the preview's kept file (`token`), else the picked file sent from disk (its bytes
+  // never enter JavaScript) or a pasted link the server downloads itself; what to make of it in the
+  // query. A token the server no longer has (410) is followed by the file or link itself. The answer
+  // carries the new audiobook's id (`gen`), to open its player.
+  importBook: async ([path, name, link, model, voice, voiceName, title, author, share, rights, token], store, storage): Promise<Imported> => {
+    if (!session(store)) return { ok: false, error: 'Sign in to import a book.', gen: '' };
+    try {
+      const send = (kept: string) => {
+        const query = new URLSearchParams({ name, model, voice, voiceName, title, author, public: share ? '1' : '0', rights: rights ? '1' : '0',
+          ...(kept ? { token: kept } : link ? { link } : {}) });
+        return fetch(`${API}/audiobooks?${query}`, {
+          method: 'POST', exactTimeout: link && !kept ? 180000 : 120000, headers: { 'content-type': 'application/octet-stream', ...bearer(store) },
+          ...(kept || link ? {} : { exactBodyFrom: path }),
+        });
+      };
+      let res = await send(token);
+      if (token && res.status === 410) res = await send('');
+      if (res.status === 401) {
+        store.forget(SESSION);
+        return { ok: false, error: 'Sign in again to import a book.', gen: '' };
+      }
+      if (!res.ok) return { ok: false, error: await refusal(res), gen: '' };
+      const body = (await res.json().catch(() => ({}))) as { id?: unknown };
+      return { ok: true, error: '', gen: String(body.id ?? '') };
+    } catch (e) {
+      if ((e as Kind).code === 'bake') throw e;
+      return { ok: false, error: UNREACHABLE, gen: '' };
     }
   },
   // Sharing on asks the person to confirm they have the right to share the book.
@@ -459,7 +563,10 @@ async function makeDir(storage: Storage, path: string) {
 // An audiobook the server can't be reached for: the copy kept with its download, else the fetch's own failure.
 async function keptVersion(id: string, storage: Storage, failure: unknown): Promise<Audiobook> {
   if ((failure as Kind)?.code === 'bake') throw failure;
-  try { return JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
+  let kept: Audiobook;
+  try { kept = JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
+  // A copy kept before the model was named says only who reads it.
+  return kept.model == null ? { ...kept, voiceName: kept.voice ?? '', model: '' } : kept;
 }
 async function keptChapters(storage: Storage): Promise<Result<'loadOffline'>> {
   const kept: Result<'loadOffline'> = [];

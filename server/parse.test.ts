@@ -78,7 +78,7 @@ describe('EPUB chapters', () => {
       </ol></nav>`),
     };
     const chapters = await parseBook('harbour.epub', epub(files, ['text/cover.xhtml', 'text/title.xhtml', 'text/legal.xhtml', 'nav/nav.xhtml', 'text/foreword.xhtml', 'text/part1.xhtml', 'text/ch1.xhtml', 'text/ch2.xhtml', 'text/ch2b.xhtml', 'text/part2.xhtml', 'text/ch3.xhtml', 'text/epilogue.xhtml', 'text/ads.xhtml', 'text/thanks.xhtml', 'text/index.xhtml']));
-    expect(chapters.map((c) => c.title)).toEqual(['Foreword', 'Chapter 1: The Harbour', 'Chapter 2: The River', 'Chapter 3: The Sea', 'Epilogue']);
+    expect(chapters.map((c) => c.title)).toEqual(['Foreword', 'The Harbour', 'The River', 'The Sea', 'Epilogue']);
     const [, one, two, three, epilogue] = chapters;
     // The title is narrated before the text, so headings that repeat it are left out.
     expect(one.text).toStartWith('harbour harbour');
@@ -115,7 +115,7 @@ describe('EPUB chapters', () => {
     const guide = '<guide><reference type="cover" href="cover.html"/><reference type="copyright-page" title="Copyright" href="rights.html"/></guide>';
     const chapters = await parseBook('harbour.epub', epub(files, ['cover.html', 'rights.html', 'prologue.html', 'preface.html', 'one.html', 'two.html', 'index.html', 'index2.html'], { guide }));
     // An unlisted prologue after skipped front matter stays; an unlisted file after the index doesn't.
-    expect(chapters.map((c) => c.title)).toEqual(['Prologue', 'Preface', 'Chapter One', 'Chapter Two']);
+    expect(chapters.map((c) => c.title)).toEqual(['Prologue', 'Preface', 'Chapter 1', 'Chapter 2']);
     expect(chapters[0].text).not.toMatch(/publishing|Prologue/);
     expect(chapters[2].text).toContain('harbour');
     expect(chapters[2].text).toContain('A Walk walking');
@@ -234,7 +234,7 @@ describe('PDF chapters', () => {
       { title: 'Index', page: 6 },
     ]);
     const chapters = await parseBook('harbour.pdf', book);
-    expect(chapters.map((c) => c.title)).toEqual(['Chapter 1: The Harbour', 'Chapter 2: The River', 'Chapter 3: The Sea']);
+    expect(chapters.map((c) => c.title)).toEqual(['The Harbour', 'The River', 'The Sea']);
     const [one, two, three] = chapters;
     expect(one.text).toBe(`${line('harbour')} ${line('harbour')}`);
     expect(two.text).toBe(`${line('river')} ${line('river')}`);
@@ -272,7 +272,7 @@ describe('ligatures', () => {
   test('Unicode ligatures and the long s are read as their letters', async () => {
     const text = `Chapter 1: The ﬁrst Floor\n${line('harbour')} ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ ſ\nChapter 2: Aﬂoat\n${line('river')}`;
     const chapters = await parseBook('harbour.txt', new TextEncoder().encode(text));
-    expect(chapters.map((c) => c.title)).toEqual(['Chapter 1: The first Floor', 'Chapter 2: Afloat']);
+    expect(chapters.map((c) => c.title)).toEqual(['The first Floor', 'Afloat']);
     expect(chapters[0].text).toBe(`${line('harbour')} ff fi fl ffi ffl st st s`);
   });
 });

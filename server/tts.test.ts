@@ -28,3 +28,12 @@ test('speech retries rate limits, stops after three attempts and does not retry 
     expect((await run()).code).toBe(1); expect(calls).toBe(3);
   } finally { provider.stop(true); }
 }, 10000);
+
+test('a model is shown by its listed name, without "(free)" and with Fish Audio as Fish', async () => {
+  const { modelLabel } = await import('./tts.ts');
+  expect(modelLabel('fish-audio/s2.1-pro-free:free')).toBe('Fish S2.1 Pro');
+  expect(modelLabel('google/gemini-3.8-flash-tts')).toBe('Gemini 3.8 Flash TTS');
+  expect(modelLabel('exalt/silence')).toBe('Silence');
+  // One no longer in the list is named by its id.
+  expect(modelLabel('someone/retired-voice:free')).toBe('retired-voice');
+});

@@ -70,7 +70,7 @@ test('a chapter plays from its first part while the rest are narrated, at the ad
     const { id } = await made.json() as { id: string };
     const gen = () => s.call('GET', `/generations/${id}`).then((r) => r.json() as Promise<{ status: string; active: number; chapters: Chapter[] }>);
     await until('the first chapter', async () => { const g = await gen(); return g.status === 'ready' && g.active === 0; });
-    const parts = partsOf('Chapter 2: The Light', prose.repeat(80).trim());
+    const parts = partsOf('Chapter 2. The Light.', prose.repeat(80).trim());
     // Parts start small and grow, so the first is back soonest.
     expect(parts.length).toBeGreaterThanOrEqual(4);
     expect(parts[0].length).toBeLessThanOrEqual(600);

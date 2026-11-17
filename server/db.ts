@@ -74,6 +74,12 @@ db.run(`CREATE TABLE IF NOT EXISTS chapters (
   PRIMARY KEY (generation_id, idx)
 )`);
 db.run('CREATE INDEX IF NOT EXISTS chapters_status ON chapters(status, requested_at)');
+// What's narrated before a chapter's text ("Chapter 4. Loomings."), and its title as titles.ts read
+// it (JSON: kind, label, n, name, part). Chapters kept before these have neither and narrate their title.
+for (const [name, type] of [['heading', "TEXT NOT NULL DEFAULT ''"], ['title_parts', "TEXT NOT NULL DEFAULT ''"]]) {
+  if (!(db.query('PRAGMA table_info(chapters)').all() as { name: string }[]).some((c) => c.name === name))
+    db.run(`ALTER TABLE chapters ADD COLUMN ${name} ${type}`);
+}
 db.run('CREATE INDEX IF NOT EXISTS tracks_file ON tracks(file)');
 // The server's own small values, such as the key that signs private audio URLs (signing.ts).
 db.run('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
@@ -88,7 +94,7 @@ export type TrackRow = { generation_id: number; idx: number; title: string; file
 export type AudiobookRow = GenerationRow & { title: string; author: string; cover: string };
 export type ChapterRow = {
   generation_id: number; idx: number; title: string; text: string | null; status: string; requested_by: number | null;
-  requested_at: number; parts_done: number; parts_total: number; error: string;
+  requested_at: number; parts_done: number; parts_total: number; error: string; heading?: string; title_parts?: string;
 };
 
 export const getBook = (id: string) => db.query('SELECT * FROM books WHERE id = ?').get(id) as BookRow | null;

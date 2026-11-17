@@ -121,7 +121,7 @@ test('the route checks a link before reserving anything, and imports the offline
     const { id } = await made.json() as { id: string };
     let g: { status: string; active: number; chapters: { title: string; status: string }[] } | undefined;
     for (let i = 0; i < 200 && !(g?.status === 'ready' && g.active === 0); i++) { await Bun.sleep(20); g = await fetch(`${address}/generations/${id}`).then((r) => r.json()); }
-    expect(g!.chapters.map((c) => [c.title, c.status])).toEqual([['Chapter One: The Harbour', 'ready'], ['Chapter Two: The River', 'idle'], ['Chapter Three: The Sea', 'idle']]);
+    expect(g!.chapters.map((c) => [c.title, c.status])).toEqual([['The Harbour', 'ready'], ['The River', 'idle'], ['The Sea', 'idle']]);
     // The link itself isn't kept: only its hash, which finds this audiobook again.
     const row = db.query('SELECT source_name, source_ref FROM generations WHERE id = ?').get(id) as { source_name: string; source_ref: string };
     expect(row.source_name).toBe('A Quiet Harbour.txt');
