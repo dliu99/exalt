@@ -156,6 +156,28 @@ export const tidy = (s: string) => s.replace(/\s+/g, ' ').trim();
 const LIGATURES: Record<string, string> = { '\uFB00': 'ff', '\uFB01': 'fi', '\uFB02': 'fl', '\uFB03': 'ffi', '\uFB04': 'ffl', '\uFB05': 'st', '\uFB06': 'st', '\u017F': 's' };
 export const unligate = (s: string) => s.replace(/[\uFB00-\uFB06\u017F]/g, (c) => LIGATURES[c]);
 export const words = (s: string) => s.match(/\S+/g)?.length ?? 0;
+
+// A chapter at a glance, for a list: its opening line and about how many words it holds. The words
+// come from the text's length (an English word and its space average about six characters), so no
+// pass over the text is made; the opening reads only the first few hundred characters. Both stay
+// cheap on the phone's interpreter, whatever the chapter's length.
+export type Glance = { title: string; opening: string; words: number };
+const ABBREVIATION = /\b(Mr|Mrs|Ms|Dr|St|Sr|Jr|Prof|Capt|Col|Gen|Lt|Rev|Mme|Mlle|No|Vol|[A-Z])\.$/;
+export function glance(c: { title: string; text: string }): Glance {
+  let head = c.text.slice(0, 400).replace(/\s+/g, ' ').trim()
+    // A plain-text book's emphasis (_the_ woman) and a section's own numeral ("I. To Sherlock…").
+    .replace(/_([^_]+)_/g, '$1').replace(/^(?:[IVXLC]{1,6}|\d{1,3})\.\s+(?=\p{Lu})/u, '');
+  // A decorated opening set in capitals ("IT is", "MR. BENNET was", "WHEN Jane") reads in sentence case.
+  head = head.replace(/^((?:\p{Lu}[\p{Lu}’'.]*\s){1,3})(?=\p{Lu}?\p{Ll})/u, (caps) => caps.toLowerCase().replace(/(^|\s)(\p{L})/gu, (_, s, l) => s + l.toUpperCase()));
+  let end = -1;
+  for (const m of head.matchAll(/[.!?…][”’"')\]]*(?=\s+["“‘'(\[]?\p{Lu})/gu)) {
+    const at = m.index! + m[0].length;
+    if (at >= 10 && !ABBREVIATION.test(head.slice(0, m.index! + 1))) { end = at; break; }
+  }
+  let opening = end > 0 && end <= 140 ? head.slice(0, end) : head.slice(0, 120).replace(/\s+\S*$/, '') + '…';
+  if (head.length < 120 && end < 0) opening = head;
+  return { title: c.title, opening, words: Math.round(c.text.length / 6) };
+}
 // A title's words, for comparing titles and headings regardless of case, spacing and punctuation.
 export const norm = (s: string) => s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 export const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -258,10 +280,15 @@ export function chapterLevel<At>(entries: Entry<At>[]): Entry<At>[] {
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '—', ndash: '–', hellip: '…', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“' };
 const decode = (s: string) => s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (all, e: string) =>
   e[0] === '#' ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1))) : ENTITIES[e.toLowerCase()] ?? all);
+// A decorated first letter drawn as a picture keeps its letter (`<img alt="N"/>OT all` is "NOT all"),
+// and inline tags join what they wrap as a page shows it (`<span>I</span>T is` is "IT is"); only
+// block tags and other markup part words.
+const INLINE = /^<\/?(span|a|b|i|em|strong|small|sup|sub|u|s|font|abbr|cite|q|mark|big|tt|code)\b[^>]*>$/i;
 const htmlText = (html: string) => decode(html
   .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
   .replace(/<\/(p|div|h\d|li|br)>|<br\s*\/?>/gi, '\n')
-  .replace(/<[^>]+>/g, ' '));
+  .replace(/<img\b[^>]*>/gi, (tag) => (/^[A-Za-z]{1,2}$/.test(attr(tag, 'alt')) ? attr(tag, 'alt') : ' '))
+  .replace(/<[^>]+>/g, (tag) => (INLINE.test(tag) ? '' : ' ')));
 const attr = (tag: string, name: string) => tag.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1] ?? '';
 const unescape = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
 

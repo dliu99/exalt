@@ -2,7 +2,7 @@ import type { Answer, Result, Sources, Storage, Store } from './app.contract.d.t
 import { credentials } from '@exact/passkeys';
 import { preventSilentAccess } from '@exact/sign-in';
 import { oauth } from '@exact/oauth';
-import { readBook } from './server/book.ts';
+import { glance, readBook, type Glance } from './server/book.ts';
 
 // The server's address, its one place: server/index.ts listens on it. A deployed server is
 // API_BASE_URL (app.json `env`).
@@ -52,6 +52,16 @@ const COVER_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', g
 // A turn of the data module has a budget (100 ms on an interpreter): the long reads below end theirs
 // as they go, and go on in a new one.
 const nextTurn = () => scheduler.yield();
+// Each chapter at a glance (its opening line and length), a turn ended every few dozen chapters
+// so a long book stays within a turn's budget on the phone's interpreter.
+async function glances(chapters: { title: string; text: string }[]): Promise<Glance[]> {
+  const out: Glance[] = [];
+  for (const [i, c] of chapters.entries()) {
+    if (i > 0 && i % 48 === 0) await nextTurn();
+    out.push(glance(c));
+  }
+  return out;
+}
 // Base64 a few slices a turn: each slice a multiple of three bytes, so the pieces join as one.
 async function base64(bytes: Uint8Array): Promise<string> {
   let out = '';
@@ -445,7 +455,7 @@ const sources: Sources = {
           const { chapters, meta } = await readBook(name, bytes, nextTurn);
           const cover = meta.cover && meta.cover.bytes.length <= PREVIEW_COVER_BYTES ? `data:${COVER_TYPES[meta.cover.ext]};base64,${await base64(meta.cover.bytes)}` : '';
           return { ok: true, error: '', title: meta.title || name.replace(/\.[^.]*$/, '').trim() || 'Untitled', author: meta.author, cover,
-            chapters: chapters.map((c) => c.title), token: '', words: wordsIn(chapters) };
+            chapters: await glances(chapters), token: '', words: wordsIn(chapters) };
         } catch (e) { return none(String((e as Error)?.message ?? e)); }
       }
       const query = new URLSearchParams(link ? { link } : { name });
@@ -460,7 +470,8 @@ const sources: Sources = {
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; title?: string; author?: string; cover?: string; chapters?: unknown[]; token?: string; words?: number };
       if (!res.ok || !body.ok) return none(body.error || 'The server had a problem. Try again.');
       return { ok: true, error: '', title: String(body.title ?? ''), author: String(body.author ?? ''), cover: String(body.cover ?? ''),
-        chapters: (body.chapters ?? []).map(String), token: String(body.token ?? ''), words: Number(body.words) || 0 };
+        chapters: ((body.chapters ?? []) as Partial<Glance>[]).map((c) => ({ title: String(c.title ?? ''), opening: String(c.opening ?? ''), words: Number(c.words) || 0 })),
+        token: String(body.token ?? ''), words: Number(body.words) || 0 };
     } catch (e) {
       if ((e as Kind).code === 'bake') throw e;
       return none(UNREACHABLE);

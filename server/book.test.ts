@@ -3,7 +3,7 @@
 // bookMeta (fflate). Both must read the same book.
 import { expect, test } from 'bun:test';
 import { strToU8, zipSync } from 'fflate';
-import { bookMeta, readBook } from './book.ts';
+import { bookMeta, glance, readBook } from './book.ts';
 import { parseBook } from './parse.ts';
 
 const prose = (word: string) => `<p>${Array(40).fill(word).join(' ')}.</p>`;
@@ -113,4 +113,33 @@ test('a plain-text book is read between its Gutenberg lines, past its contents, 
   ]);
   expect(chapters.some((c) => /license/.test(c.text))).toBe(false);
   expect(chapters[0].text).toContain('part of the fence fell');
+});
+
+// An illustrated edition sets each chapter's first letter as a picture or in its own span
+// (Gutenberg's Pride and Prejudice): the letter is read, and the word stays whole.
+test('a decorated first letter stays in the text', async () => {
+  const book = zipSync({
+    mimetype: [strToU8('application/epub+zip'), { level: 0 }],
+    'META-INF/container.xml': strToU8('<?xml version="1.0"?><container><rootfiles><rootfile full-path="c.opf"/></rootfiles></container>'),
+    'c.opf': strToU8(`<?xml version="1.0"?><package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>P</dc:title></metadata>
+      <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>`),
+    'a.xhtml': strToU8(`<html><body><h2>Chapter I.</h2><p><span class="letra">I</span>T is a truth ${'universally acknowledged '.repeat(40)}.</p>
+      <h2>Chapter II.</h2><p><span class="letra"><img alt="N" src="n.png"/></span>OT all that Mrs. Bennet ${'could ask '.repeat(40)}.</p></body></html>`),
+  });
+  const { chapters } = await readBook('p.epub', book);
+  const text = chapters.map((c) => c.text).join(' ');
+  expect(text).toContain('IT is a truth');
+  expect(text).toContain('NOT all that Mrs. Bennet');
+  expect(chapters).toEqual(await parseBook('p.epub', book));
+});
+
+test('a chapter at a glance: its opening line, in sentence case, and its length', () => {
+  const at = (text: string) => glance({ title: 'Chapter 1', text }).opening;
+  expect(at('IT is a truth universally acknowledged. That a single man…')).toBe('It is a truth universally acknowledged.');
+  expect(at('MR. BENNET was among the earliest of those who waited on Mr. Bingley. He had always intended it.')).toBe('Mr. Bennet was among the earliest of those who waited on Mr. Bingley.');
+  expect(at('WHEN Jane and Elizabeth were alone. The former spoke.')).toBe('When Jane and Elizabeth were alone.');
+  expect(at('Call me Ishmael. Some years ago—never mind how long precisely.')).toBe('Call me Ishmael.');
+  expect(at('I. To Sherlock Holmes she is always _the_ woman. I have seldom heard him mention her.')).toBe('To Sherlock Holmes she is always the woman.');
+  expect(at(`Alice was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do: once or twice she had peeped`)).toMatch(/^Alice was beginning .+…$/);
+  expect(glance({ title: 'T', text: 'x'.repeat(6000) }).words).toBe(1000);
 });

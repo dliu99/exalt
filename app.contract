@@ -119,6 +119,12 @@ shape Ready
 shape Page
   visibilityState: string
 
+// A chapter at a glance in Add a Book: its title, its opening line, and about how many words it holds.
+shape PreviewChapter
+  title: string
+  opening: string
+  words: number
+
 // What a file or a link is, read before anything is made: Add a Book's second step.
 // An import's answer: the new audiobook, whose chapters open next.
 shape Imported
@@ -132,7 +138,7 @@ shape ImportPreview
   title: string
   author: string
   cover: string
-  chapters: string[]
+  chapters: PreviewChapter[]
   // About how many words the book holds, for its reading time and pages.
   words: number
   // What the server kept of a file it read (a link's download), so Generate needn't fetch it again; "" when the phone read it.
@@ -224,6 +230,12 @@ fn statusOf(m: Mine, ps: Place[]): string = m.status != "ready" ? workText(m) : 
 // the model when it reads in its own voice.
 fn narratedBy(voice: string, model: string): string = voice == "" ? (model == "" ? "" : `Narrated by ${model}`) : model == "" ? `Narrated by ${voice}` : `Narrated by ${voice} (${model})`
 fn creditOf(narration: string, by: string): string = narration == "" ? by : `${narration} · ${by}`
+
+// About how long a stretch of a book takes to hear, at a narrator's 155 words a minute, and its
+// pages at 275 words each.
+fn minutesOf(words: number): number = max(1, round(words / 155))
+fn timeText(m: number): string = m >= 60 ? `${floor(m / 60)} h ${m % 60} min` : `${m} min`
+fn pagesText(words: number): string = max(1, round(words / 275)) == 1 ? "1 p." : `${round(words / 275)} pp.`
 
 component App
   // The lander: a hero over the painting, and a stack of books lying across the fold. Scrolling
@@ -325,7 +337,7 @@ component App
   derive adding = filePath != "" or linkTaken != ""
   // About how long the book takes to hear, at a narrator's 155 words a minute.
   derive listenMins = max(1, round(preview.words / 155))
-  derive listenText = listenMins >= 60 ? `${floor(listenMins / 60)} h ${listenMins % 60} min` : `${listenMins} min`
+  derive listenText = timeText(listenMins)
   // What the wait is: a link is fetched by the server; a file is read on the phone (a PDF by the server).
   derive linkHost = match linkTaken.split("/").at(2) { case some(h) => h, case none => "" }
   derive readingText = linkTaken != "" ? `Downloading from ${linkHost}…` : fileName.toLowerCase().endsWith(".pdf") ? "Reading the PDF…" : "Reading the book…"
@@ -554,6 +566,9 @@ component App
     refusal = ""
     if account.signedIn
       resetAdd()
+      // The models are asked again if the first ask found no server (the app opened before it).
+      if models.length == 0
+        refresh models
       nav = push(nav, path("add"))
     else
       pendingAuth = "import"
@@ -1182,11 +1197,16 @@ component App
                       if preview.author != ""
                         text preview.author.toUpperCase() font-family="Jost" font-weight=500 font-size="0.6875rem" letter-spacing="0.26em" color="light-dark(#6b7080, #6b7080)" text-align="center" testId="add-author"
                     // The book in numbers: about how long it is to hear, and its pages.
-                    text `${listenText}  ·  ${max(1, round(preview.words / 275))} pp.` padding-top=14 font-size="0.9375rem" font-weight=500 color="light-dark(#4a4f5c, #4a4f5c)" font-variant-numeric="tabular-nums" text-align="center" testId="add-stats"
+                    text `${listenText}  ·  ${pagesText(preview.words)}` padding-top=14 font-size="0.9375rem" font-weight=500 color="light-dark(#4a4f5c, #4a4f5c)" font-variant-numeric="tabular-nums" text-align="center" testId="add-stats"
                   column testId="add-chapters"
+                    // Each chapter: its name (or "Chapter 4"), its opening line, and about how long it is.
                     for c, i in preview.chapters key=i
-                      row padding="11px 0" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))")
-                        text c font-size="0.9375rem" color="light-dark(#14171f, #14171f)" flex=1 min-width=0 line-clamp=1
+                      row padding="12px 0" gap=14 align-items="flex-start" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))") testId=`add-chapter-${i}`
+                        column flex=1 min-width=0 gap=3
+                          text c.title font-size="0.9375rem" color="light-dark(#14171f, #14171f)" line-clamp=1
+                          if c.opening != ""
+                            text c.opening font-size="0.8125rem" line-height=1.35 color="light-dark(#8a8f9c, #8a8f9c)" line-clamp=1
+                        text `${timeText(minutesOf(c.words))} · ${pagesText(c.words)}` font-size="0.75rem" color="light-dark(#8a8f9c, #8a8f9c)" font-variant-numeric="tabular-nums" flex-shrink=0 padding-top=3
                   // Sharing, quiet and off unless turned on; on, it asks for the right to share first.
                   column width="100%" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))" padding-top=6 testId="add-share"
                     row align-items="center" justify-content="space-between" gap=16 min-height=48

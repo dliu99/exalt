@@ -75,7 +75,7 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
 
     // An EPUB: its metadata, its cover inline, its chapter titles in order.
     expect(await preview({ name: 'upload.epub' }, epub()).then((r) => r.json())).toEqual({ ok: true, error: '', title: 'The Lantern Keeper',
-      author: 'Mara Ellison', cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: ['Chapter 1', 'Chapter 2'],
+      author: 'Mara Ellison', cover: `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`, chapters: [expect.objectContaining({ title: 'Chapter 1' }), expect.objectContaining({ title: 'Chapter 2' })],
       token: expect.stringMatching(/^[\w-]{24}$/), words: expect.any(Number) });
 
     // A PDF: named by its file, no cover, its pages in parts.
@@ -85,7 +85,7 @@ test('a preview says what a file or link is, and keeps nothing', async () => {
 
     // A link (the offline server's sample book).
     expect(await preview({ link: 'https://books.example/a-quiet-harbour.txt' }).then((r) => r.json())).toEqual({ ok: true, error: '',
-      title: 'A Quiet Harbour', author: '', cover: '', chapters: ['The Harbour', 'The River', 'The Sea'],
+      title: 'A Quiet Harbour', author: '', cover: '', chapters: ['The Harbour', 'The River', 'The Sea'].map((title) => expect.objectContaining({ title, opening: expect.any(String), words: expect.any(Number) })),
       token: expect.any(String), words: expect.any(Number) });
 
     // Not a book, or a link refused: ok false, and why.
