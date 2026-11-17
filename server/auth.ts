@@ -13,6 +13,7 @@
 //                           in through @exact/oauth because exact's native Google identity is unbuilt
 //   GET  /me                bearer                       → {name, email} | 401
 //   POST /sign-out          bearer                       → {ok}
+//   DELETE /me              bearer                       → {ok}  the account and all it made (index.ts)
 //
 // Who may sign in is the clients app.ts names (CLIENTS): the token's `aud` must be one of
 // them. Under `--offline` with SIGN_IN_TEST_KEYS, tokens signed by exact's fixture provider
@@ -256,6 +257,12 @@ export function auth(o: AuthOptions) {
     signOut(req: Request) {
       const token = req.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1];
       if (token) db.query('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+    },
+
+    /** The account and every session of it, on every device. */
+    remove(userId: number) {
+      db.query('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      db.query('DELETE FROM users WHERE id = ?').run(userId);
     },
   };
 }

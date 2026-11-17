@@ -14,8 +14,7 @@
     "ios": {
       "minimumOS": "17.0",
       "deviceFamily": [
-        "iphone",
-        "ipad"
+        "iphone"
       ],
       "backgroundModes": [
         "audio"
