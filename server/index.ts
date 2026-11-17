@@ -120,10 +120,25 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   },
   // Whether the app asks for an account before anything else: not offline, where no provider can answer.
   '/door': { OPTIONS: preflight, GET: () => send({ required: !OFFLINE }) },
-  '/me': { OPTIONS: preflight, GET: (req) => {
-    const me = accounts.user(req);
-    return me ? send({ name: me.name, email: me.email }) : signedOut();
-  } },
+  '/me': { OPTIONS: preflight,
+    GET: (req) => {
+      const me = accounts.user(req);
+      return me ? send({ name: me.name, email: me.email }) : signedOut();
+    },
+    // Deleting the account: every audiobook they made (audio and all, shared ones too), where they
+    // are in others', the chapters they asked for no longer counted as theirs, and every session.
+    DELETE: async (req) => {
+      const me = userOf(req);
+      if (!me) return signedOut();
+      for (const g of generationsBy(me.id)) await removeAudiobook(g.id);
+      db.transaction(() => {
+        db.query('UPDATE chapters SET requested_by = NULL WHERE requested_by = ?').run(me.id);
+        db.query('DELETE FROM places WHERE user_id = ?').run(me.id);
+        accounts.remove(me.id);
+      })();
+      return send({ ok: true });
+    },
+  },
   '/sign-out': { OPTIONS: preflight, POST: (req) => { accounts.signOut(req); return send({ ok: true }); } },
 
   // The signed-in person's library: everything they have imported, finished or not.
