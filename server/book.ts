@@ -287,7 +287,7 @@ const INLINE = /^<\/?(span|a|b|i|em|strong|small|sup|sub|u|s|font|abbr|cite|q|ma
 const htmlText = (html: string) => decode(html
   .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
   .replace(/<\/(p|div|h\d|li|br)>|<br\s*\/?>/gi, '\n')
-  .replace(/<img\b[^>]*>/gi, (tag) => (/^[A-Za-z]{1,2}$/.test(attr(tag, 'alt')) ? attr(tag, 'alt') : ' '))
+  .replace(/<img\b[^>]*>/gi, (tag) => (/^[“"‘']?[A-Za-z]{1,2}$/.test(attr(tag, 'alt')) ? attr(tag, 'alt') : ' '))
   .replace(/<[^>]+>/g, (tag) => (INLINE.test(tag) ? '' : ' ')));
 const attr = (tag: string, name: string) => tag.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1] ?? '';
 const unescape = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };

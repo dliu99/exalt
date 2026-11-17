@@ -124,12 +124,14 @@ test('a decorated first letter stays in the text', async () => {
     'c.opf': strToU8(`<?xml version="1.0"?><package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>P</dc:title></metadata>
       <manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>`),
     'a.xhtml': strToU8(`<html><body><h2>Chapter I.</h2><p><span class="letra">I</span>T is a truth ${'universally acknowledged '.repeat(40)}.</p>
-      <h2>Chapter II.</h2><p><span class="letra"><img alt="N" src="n.png"/></span>OT all that Mrs. Bennet ${'could ask '.repeat(40)}.</p></body></html>`),
+      <h2>Chapter II.</h2><p><span class="letra"><img alt="N" src="n.png"/></span>OT all that Mrs. Bennet ${'could ask '.repeat(40)}.</p>
+      <p><span class="letra"> <img alt="“I" src="i.png"/></span> hope, my dear,” said Mr. Bennet.</p></body></html>`),
   });
   const { chapters } = await readBook('p.epub', book);
   const text = chapters.map((c) => c.text).join(' ');
   expect(text).toContain('IT is a truth');
   expect(text).toContain('NOT all that Mrs. Bennet');
+  expect(text).toContain('“I hope, my dear,”');
   expect(chapters).toEqual(await parseBook('p.epub', book));
 });
 

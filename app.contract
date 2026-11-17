@@ -312,6 +312,8 @@ component App
   state link = ""
   // Add a Book: a link is taken at Add, in its own sheet; then the book it is is read.
   state linkTaken = ""
+  // Add a Book shows a book's first chapters until Show more.
+  state allChapters = false
   state importTitle = ""
   state importAuthor = ""
   state model = ""
@@ -574,7 +576,10 @@ component App
       pendingAuth = "import"
       haptic("selection")
       showModal("account-sheet")
+  action toggleChapters
+    allChapters = not allChapters
   action resetAdd
+    allChapters = false
     filePath = ""
     fileName = ""
     link = ""
@@ -1200,13 +1205,16 @@ component App
                     text `${listenText}  ·  ${pagesText(preview.words)}` padding-top=14 font-size="0.9375rem" font-weight=500 color="light-dark(#4a4f5c, #4a4f5c)" font-variant-numeric="tabular-nums" text-align="center" testId="add-stats"
                   column testId="add-chapters"
                     // Each chapter: its name (or "Chapter 4"), its opening line, and about how long it is.
-                    for c, i in preview.chapters key=i
+                    for c, i in (allChapters ? preview.chapters : preview.chapters.slice(0, 8)) key=i
                       row padding="12px 0" gap=14 align-items="flex-start" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))") testId=`add-chapter-${i}`
                         column flex=1 min-width=0 gap=3
                           text c.title font-size="0.9375rem" color="light-dark(#14171f, #14171f)" line-clamp=1
                           if c.opening != ""
                             text c.opening font-size="0.8125rem" line-height=1.35 color="light-dark(#8a8f9c, #8a8f9c)" line-clamp=1
                         text timeText(minutesOf(c.words)) font-size="0.75rem" color="light-dark(#8a8f9c, #8a8f9c)" font-variant-numeric="tabular-nums" flex-shrink=0 padding-top=3
+                    if preview.chapters.length > 8
+                      button press=toggleChapters appearance="none" testId="add-more-chapters" align-self="flex-start" padding="12px 0" min-height=44 cursor="pointer" -exact-press-opacity=0.6
+                        text (allChapters ? "Show less" : `Show all ${preview.chapters.length} chapters`) font-size="0.9375rem" color="light-dark(#14171f, #14171f)"
                   // Sharing, quiet and off unless turned on; on, it asks for the right to share first.
                   column width="100%" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))" padding-top=6 testId="add-share"
                     row align-items="center" justify-content="space-between" gap=16 min-height=48
