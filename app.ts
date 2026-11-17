@@ -359,6 +359,10 @@ const sources: Sources = {
   })),
   loadGreats: async () => greats.map(([isbn, title, author]) => ({ id: isbn, title, author, cover: `assets/covers/${isbn}.jpg` })),
   loadModels: async () => ((await get('/models')) as { id: string; name: string; voices?: string[] }[]).map((m) => ({ id: m.id, name: m.name, voices: m.voices ?? [] })),
+  // Everyone's shared, finished audiobooks, newest first (Home's feed); `q` narrows to a title or author.
+  loadBrowse: async ([q]) => ((await get(`/browse?q=${encodeURIComponent(q.trim())}`)) as Record<string, unknown>[]).map((g) => ({
+    id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+  })),
   // The signed-in person's audiobooks, newest first, finished or not; nothing when signed out.
   loadLibrary: async (_a, store) => {
     if (!session(store)) return [];

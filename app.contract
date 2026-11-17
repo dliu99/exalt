@@ -135,7 +135,7 @@ shape ImportPreview
   // What the server kept of a file it read (a link's download), so Generate needn't fetch it again; "" when the phone read it.
   token: string
 
-// An audiobook someone shared, in Browse.
+// An audiobook someone shared: Home's feed, under the person's own shelf.
 shape Shared
   id: string
   title: string
@@ -274,9 +274,9 @@ component App
   state aimed = ""
   state renameTitle = ""
   state changeMessage = ""
-  mutation shared as shape Reply refreshes library, audiobook then afterShared
-  mutation renamed as shape Reply refreshes library, places, audiobook then afterRenamed
-  mutation removed as shape Reply refreshes library, places then afterRemoved
+  mutation shared as shape Reply refreshes library, browse, audiobook then afterShared
+  mutation renamed as shape Reply refreshes library, browse, places, audiobook then afterRenamed
+  mutation removed as shape Reply refreshes library, browse, places then afterRemoved
   derive aimedPublic = library.filter(m => m.id == aimed and m.public).length > 0
   derive aimedTitle = match first(library.filter(m => m.id == aimed)) { case some(m) => m.title, case none => "" }
   derive working = library.filter(m => m.status == "queued" or m.status == "working" or m.active > 0).length > 0
@@ -294,11 +294,13 @@ component App
   state importAuthor = ""
   state model = ""
   state voice = ""
-  // Shared audiobooks have no screen here (no Browse): an import stays private.
+  // An import is private unless the person turns sharing on in Add a Book, and sharing asks them
+  // to confirm the right to (the server refuses it otherwise). Off by default: Generate stays one
+  // tap, and nothing goes public by an unread switch or a reflexive tick of the rights box.
   state share = false
   state rights = false
   state refusal = ""
-  mutation imported as shape Imported refreshes library then afterImport
+  mutation imported as shape Imported refreshes library, browse then afterImport
   // The model in effect: the one chosen, or the first until one is.
   derive chosenModel = model != "" ? model : match first(models) { case some(m) => m.id, case none => "" }
   derive fishModel = chosenModel.startsWith("fish-audio/")
@@ -319,6 +321,11 @@ component App
   derive linkHost = match linkTaken.split("/").at(2) { case some(h) => h, case none => "" }
   derive readingText = linkTaken != "" ? `Downloading from ${linkHost}…` : fileName.toLowerCase().endsWith(".pdf") ? "Reading the PDF…" : "Reading the book…"
   resource preview = previewImport(adding ? filePath : "", adding ? fileName : "", adding ? linkTaken : "") as shape ImportPreview else empty(ok=false, error="", title="", author="", cover="", chapters=[], token="", words=0)
+  // The feed: everyone's shared, finished audiobooks, newest first, on Home under the person's own
+  // shelf (their own aren't shown twice).
+  resource browse = loadBrowse("") as shape Shared[] else empty()
+  derive feed = browse.filter(s => library.filter(m => m.id == s.id).length == 0)
+  derive ownShelf = account.signedIn or feed.length == 0
   // Z-Library and LibGen open over the app (Safari's view on iOS), and Done comes back.
   mutation browser as shape BrowserResult
 
@@ -418,6 +425,9 @@ component App
     after(1, carryOn)
   task voiceSearching when voiceQuery.trim() != voiceAsked key=voiceQuery
     after(300, takeVoiceQuery)
+  // The feed is asked afresh each time Home is on top: what's shared changes while the app is open.
+  task browsing when top(nav).name == "home"
+    after(1, freshBrowse)
 
   // A drag's end can be followed by a click on the stack; it is spent a moment later either way.
   task settling when moved and not dragging
@@ -452,6 +462,7 @@ component App
       refresh account
     if working
       refresh library
+      refresh browse
     // What's loaded is watched while its chapters narrate, and while the player waits at one that isn't narrated (someone may narrate it).
     if loaded != "" and (narrating or (playerOpen and trackSrc(audiobook, track) == ""))
       refresh audiobook
@@ -461,6 +472,8 @@ component App
   action retryLibrary
     refresh library
     refresh account
+  action freshBrowse
+    refresh browse
   action back
     if top(nav).name == "play"
       keepPlace()
@@ -541,6 +554,9 @@ component App
     importTitle = ""
     importAuthor = ""
     refusal = ""
+    // The right to share is confirmed for a book, so another starts private again.
+    share = false
+    rights = false
   action takeLink
     if link.trim().startsWith("https://")
       linkTaken = link.trim()
@@ -600,6 +616,7 @@ component App
       importTitle = ""
       importAuthor = ""
       linkTaken = ""
+      share = false
       rights = false
       // The new audiobook opens at once: its chapters, narrating.
       let made = match imported { case some(r) => r.gen, case none => "" }
@@ -1017,8 +1034,9 @@ component App
                     text "by" font-family="Jost" font-size="min(-exact-footnote, 16px)" color="light-dark(#9a978f, #9a978f)"
                     link href="https://devinliu.xyz" testId="credit-link"
                       text "Devin Liu" font-family="Jost" font-size="min(-exact-footnote, 16px)" color="light-dark(#eeebe4, #eeebe4)" border-bottom="1px solid light-dark(rgba(238,235,228,0.35), rgba(238,235,228,0.35))" padding-bottom=1
-        // Home, the library: covers on a shelf and no words. A tap opens the book's chapters in the
-        // player; a long press has Rename and Delete. The + and what's playing float at the foot.
+        // Home, the library: covers on a shelf and no words, and under it what others have shared. A
+        // tap opens the book's chapters in the player; a long press on one's own has Share, Rename
+        // and Delete. The + and what's playing float at the foot.
         if e.name == "home"
           column navigationKey=`${e.id}` navigationBar="none" navigationScroll="library-shelf" position="absolute" inset=0 status-bar-style="dark-content" background-color="light-dark(#eceef2, #eceef2)" testId="home"
             text "Library" role="heading" aria-level=1 position="absolute" width="0.0625rem" height="0.0625rem" overflow="hidden" opacity=0 testId="home-title"
@@ -1031,35 +1049,56 @@ component App
                   text "Sign Out"
             scroll id="library-shelf" flex=1 min-height=0 width="100%" overflow-x="hidden" overflow-y="auto"
               column margin="0 auto" width="100%" max-width="47.5rem" box-sizing="border-box" padding=(wide ? "120px 40px 140px" : "calc(env(safe-area-inset-top) + 76px) 24px 140px")
-                if failed(library) and library.length == 0
-                  EmptyState(symbol="symbol:alert", title="Can’t Open Your Library", message="The server didn’t answer. Try again in a moment.")
-                    button press=retryLibrary testId="library-retry"
-                      text "Try Again"
-                else if library.length == 0
-                  // Nothing yet: faint blank covers on the shelf.
-                  row gap=(wide ? 28 : 18) aria-hidden="true" testId="library-empty"
-                    for p in ["a", "b", "c"] key=p
-                      view flex=1 aspect-ratio="2 / 3" border-radius=6 border="1px solid light-dark(rgba(20,23,31,0.1), rgba(20,23,31,0.1))" background-color="light-dark(rgba(255,255,255,0.4), rgba(255,255,255,0.4))"
-                else
-                  view display="grid" grid-template-columns=(wide ? "repeat(5, 1fr)" : "repeat(3, 1fr)") gap=(wide ? 28 : 18) row-gap=(wide ? 36 : 26) testId="library"
-                    for m in library key=m.id
-                      button press=openMine(m) contextmenu=aim(m.id) contextPopover="row-menu" appearance="none" padding=0 cursor="pointer" testId=`mine-${m.id}`
-                        aria-label=`${m.title}, ${statusOf(m, places)}` position="relative" -exact-press-scale=0.96 -exact-press-haptic="selection"
-                        view width="100%" aspect-ratio="2 / 3" border-radius=4 overflow="hidden" background-color="light-dark(#2a2d36, #2a2d36)"
-                          box-shadow="0 14px 24px -14px rgba(8,10,18,0.5)" opacity=(m.status == "failed" ? 0.45 : 1)
-                          if m.cover != ""
-                            image m.cover alt="" width="100%" height="100%" object-fit="cover"
-                          else
-                            column position="absolute" inset=0 padding=10 justify-content="center" align-items="center"
-                              text m.title font-family="Jost" font-weight=300 font-size="0.8125rem" line-height=1.2 color="light-dark(#eeebe4, #eeebe4)" text-align="center" line-clamp=5
-                          // Narrating: how much of it is done, a hairline along the cover's foot.
-                          if m.status != "ready" or m.active > 0
-                            view position="absolute" left=0 right=0 bottom=0 height=3 background-color="light-dark(rgba(255,255,255,0.35), rgba(255,255,255,0.35))"
-                              view height=3 background-color="light-dark(#f4f2ec, #f4f2ec)" width=`${m.total > 0 ? round(m.done / m.total * 100) : 0}%` testId=`mine-status-${m.id}`
+                // The person's own shelf: signed out, it shows only while nothing is shared.
+                if ownShelf
+                  if failed(library) and library.length == 0
+                    EmptyState(symbol="symbol:alert", title="Can’t Open Your Library", message="The server didn’t answer. Try again in a moment.")
+                      button press=retryLibrary testId="library-retry"
+                        text "Try Again"
+                  else if library.length == 0
+                    // Nothing yet: faint blank covers on the shelf.
+                    row gap=(wide ? 28 : 18) aria-hidden="true" testId="library-empty"
+                      for p in ["a", "b", "c"] key=p
+                        view flex=1 aspect-ratio="2 / 3" border-radius=6 border="1px solid light-dark(rgba(20,23,31,0.1), rgba(20,23,31,0.1))" background-color="light-dark(rgba(255,255,255,0.4), rgba(255,255,255,0.4))"
+                  else
+                    view display="grid" grid-template-columns=(wide ? "repeat(5, 1fr)" : "repeat(3, 1fr)") gap=(wide ? 28 : 18) row-gap=(wide ? 36 : 26) testId="library"
+                      for m in library key=m.id
+                        button press=openMine(m) contextmenu=aim(m.id) contextPopover="row-menu" appearance="none" padding=0 cursor="pointer" testId=`mine-${m.id}`
+                          aria-label=`${m.title}, ${statusOf(m, places)}` position="relative" -exact-press-scale=0.96 -exact-press-haptic="selection"
+                          view width="100%" aspect-ratio="2 / 3" border-radius=4 overflow="hidden" background-color="light-dark(#2a2d36, #2a2d36)"
+                            box-shadow="0 14px 24px -14px rgba(8,10,18,0.5)" opacity=(m.status == "failed" ? 0.45 : 1)
+                            if m.cover != ""
+                              image m.cover alt="" width="100%" height="100%" object-fit="cover"
+                            else
+                              column position="absolute" inset=0 padding=10 justify-content="center" align-items="center"
+                                text m.title font-family="Jost" font-weight=300 font-size="0.8125rem" line-height=1.2 color="light-dark(#eeebe4, #eeebe4)" text-align="center" line-clamp=5
+                            // Narrating: how much of it is done, a hairline along the cover's foot.
+                            if m.status != "ready" or m.active > 0
+                              view position="absolute" left=0 right=0 bottom=0 height=3 background-color="light-dark(rgba(255,255,255,0.35), rgba(255,255,255,0.35))"
+                                view height=3 background-color="light-dark(#f4f2ec, #f4f2ec)" width=`${m.total > 0 ? round(m.done / m.total * 100) : 0}%` testId=`mine-status-${m.id}`
+                // Shared: what others have shared, a second shelf in the same covers, under a quiet word.
+                // Signed out it is the whole of Home, with no word over it.
+                if feed.length > 0
+                  column gap=(wide ? 20 : 16) padding-top=(ownShelf ? (wide ? 72 : 56) : 0) testId="feed"
+                    if ownShelf
+                      text "Shared" role="heading" aria-level=2 font-size="0.8125rem" font-weight=500 letter-spacing="0.02em" color="light-dark(#8a8f9c, #8a8f9c)" testId="feed-title"
+                    view display="grid" grid-template-columns=(wide ? "repeat(5, 1fr)" : "repeat(3, 1fr)") gap=(wide ? 28 : 18) row-gap=(wide ? 36 : 26)
+                      for b in feed key=b.id
+                        button press=listen(b.id) appearance="none" padding=0 cursor="pointer" testId=`shared-${b.id}`
+                          aria-label=(b.author != "" ? `${b.title}, ${b.author}` : b.title) position="relative" -exact-press-scale=0.96 -exact-press-haptic="selection"
+                          view width="100%" aspect-ratio="2 / 3" border-radius=4 overflow="hidden" background-color="light-dark(#2a2d36, #2a2d36)" box-shadow="0 14px 24px -14px rgba(8,10,18,0.5)"
+                            if b.cover != ""
+                              image b.cover alt="" width="100%" height="100%" object-fit="cover"
+                            else
+                              column position="absolute" inset=0 padding=10 justify-content="center" align-items="center"
+                                text b.title font-family="Jost" font-weight=300 font-size="0.8125rem" line-height=1.2 color="light-dark(#eeebe4, #eeebe4)" text-align="center" line-clamp=5
             column id="row-menu" popover="auto" role="menu" aria-label=aimedTitle
               button press=askRename popovertarget="row-menu" popovertargetaction="hide" testId="menu-rename"
                 image "symbol:pencil"
                 text "Rename…"
+              button press=toggleShare popovertarget="row-menu" popovertargetaction="hide" testId="menu-share"
+                image (aimedPublic ? "symbol:lock" : "symbol:people")
+                text (aimedPublic ? "Make Private" : "Share Publicly")
               hr
               button press=askRemove(aimed) destructive=true popovertarget="row-menu" popovertargetaction="hide" testId="menu-delete"
                 image "symbol:delete"
@@ -1131,6 +1170,16 @@ component App
                     for c, i in preview.chapters key=i
                       row padding="11px 0" border-top=(i == 0 ? "none" : "1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))")
                         text c font-size="0.9375rem" color="light-dark(#14171f, #14171f)" flex=1 min-width=0 line-clamp=1
+                  // Sharing, quiet and off unless turned on; on, it asks for the right to share first.
+                  column width="100%" border-top="1px solid light-dark(rgba(20,23,31,0.06), rgba(20,23,31,0.06))" padding-top=6 testId="add-share"
+                    row align-items="center" justify-content="space-between" gap=16 min-height=48
+                      text "Share publicly" font-size="0.9375rem" color="light-dark(#14171f, #14171f)"
+                      input type="checkbox" switch checked=share change=setShare aria-label="Share publicly" testId="share"
+                    if share
+                      row align-items="center" justify-content="space-between" gap=16 min-height=48
+                        text "I have the right to share this book" font-size="0.9375rem" color="light-dark(#4a4f5c, #4a4f5c)" flex=1 min-width=0
+                        input type="checkbox" checked=rights change=setRights aria-label="I have the right to share this book" testId="rights"
+                    text (share ? "Anyone on Exalt can listen to it, under Shared." : "Only you can listen. You can share it later from your library.") font-size="0.8125rem" color="light-dark(#8a8f9c, #8a8f9c)" testId="share-note"
                   column gap=14 align-items="center" padding-bottom=120
                     if refusal != ""
                       text refusal font-size="0.9375rem" color="-exact-system-red" text-align="center" testId="import-hint"
@@ -1397,13 +1446,13 @@ component App
             text signInError color="light-dark(#7a241c, #7a241c)" font-family="system-ui" font-size="0.875rem" text-align="center" testId="account-error"
       // The library's alerts: deleting, sharing (the person confirms the right to share), renaming, a refusal.
       dialog id="remove-alert" role="alertdialog" aria-label=`Delete “${aimedTitle}”?`
-        text "The audiobook is gone for good, for you and for anyone listening in Browse."
+        text "The audiobook is gone for good, for you and for anyone it’s shared with."
         button press=remove destructive=true commandfor="remove-alert" command="close" testId="remove-confirm"
           text "Delete"
         button commandfor="remove-alert" command="close" testId="remove-cancel"
           text "Cancel"
       dialog id="share-alert" role="alertdialog" aria-label="Share Publicly?"
-        text "Anyone can listen to it in Browse. Only share books you have the right to."
+        text "Anyone on Exalt can listen to it. Only share books you have the right to."
         button press=shareAimed commandfor="share-alert" command="close" testId="share-confirm"
           text "I Have the Right"
         button commandfor="share-alert" command="close" testId="share-cancel"
