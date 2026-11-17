@@ -307,7 +307,7 @@ async function placesEverywhere(store: Store): Promise<Place[]> {
 // models); empty until they choose one.
 type Pref = Result<'loadVoicePref'>;
 const NO_VOICE: Pref = { id: '', title: '', cover: '' };
-const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: '', voice: '', public: false,
+const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: '', voice: '', voiceName: '', model: '', public: false,
   status: '', done: 0, total: 0, active: 0, error: '', chapters: [], mine: 0, limit: 0, owner: false };
 
 const sources: Sources = {
@@ -387,6 +387,8 @@ const sources: Sources = {
     if (!res.ok) throw new Error(str(g.error) || `The server answered ${res.status}.`);
     return {
       id: str(g.id), title: str(g.title), author: str(g.author), cover: abs(str(g.cover)), by: str(g.by), voice: str(g.voice),
+      // Who narrates it ("" for the model's own voice) and the model's shown name: "Narrated by Ada (Fish S2.1 Pro)".
+      voiceName: str(g.voiceName), model: str(g.model),
       public: g.public === true, status: str(g.status), done: Number(g.done) || 0, total: Number(g.total) || 0,
       active: Number(g.active) || 0, error: str(g.error), mine: Number(g.mine) || 0, limit: Number(g.limit) || 0, owner: g.owner === true,
       chapters: ((g.chapters ?? []) as Record<string, unknown>[]).map((c) => ({ idx: Number(c.idx) || 0, title: str(c.title), src: abs(str(c.src)),
@@ -513,7 +515,10 @@ async function makeDir(storage: Storage, path: string) {
 // An audiobook the server can't be reached for: the copy kept with its download, else the fetch's own failure.
 async function keptVersion(id: string, storage: Storage, failure: unknown): Promise<Audiobook> {
   if ((failure as Kind)?.code === 'bake') throw failure;
-  try { return JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
+  let kept: Audiobook;
+  try { kept = JSON.parse(decoder.decode(await storage.fs.readFile(`${OFFLINE}/${id}/book.json`))) as Audiobook; } catch { throw failure; }
+  // A copy kept before the model was named says only who reads it.
+  return kept.model == null ? { ...kept, voiceName: kept.voice ?? '', model: '' } : kept;
 }
 async function keptChapters(storage: Storage): Promise<Result<'loadOffline'>> {
   const kept: Result<'loadOffline'> = [];

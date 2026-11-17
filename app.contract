@@ -47,6 +47,9 @@ shape Audiobook
   cover: string
   by: string
   voice: string
+  // Who narrates it ("" for the model's own voice), and the model's shown name.
+  voiceName: string
+  model: string
   public: bool
   // Its preparation: queued or working (splitting the book), ready, or failed (error).
   status: string
@@ -217,7 +220,10 @@ fn leftOf(p: Place): number = max(0, p.duration - p.time) + (p.tracks - p.track 
 fn placeText(p: Place): string = p.duration > 0 ? `Chapter ${p.track + 1} of ${p.tracks} · ${spanText(leftOf(p))} left` : `Chapter ${p.track + 1} of ${p.tracks}`
 fn workText(m: Mine): string = m.status == "queued" ? "Waiting…" : m.status == "failed" ? (m.error == "" ? "Didn’t finish" : `Didn’t finish: ${m.error}`) : "Preparing…"
 fn statusOf(m: Mine, ps: Place[]): string = m.status != "ready" ? workText(m) : m.active > 0 ? `Narrating… · ${narratedText(m.done, m.total)}` : match first(ps.filter(p => p.gen == m.id)) { case some(p) => placeText(p), case none => `Ready · ${narratedText(m.done, m.total)}` }
-fn readBy(voice: string, by: string): string = voice == "" ? by : `Read by ${voice} · ${by}`
+// Who narrates an audiobook, and with which model: "Narrated by Ada (Fish S2.1 Pro)", or just
+// the model when it reads in its own voice.
+fn narratedBy(voice: string, model: string): string = voice == "" ? (model == "" ? "" : `Narrated by ${model}`) : model == "" ? `Narrated by ${voice}` : `Narrated by ${voice} (${model})`
+fn creditOf(narration: string, by: string): string = narration == "" ? by : `${narration} · ${by}`
 
 component App
   // The lander: a hero over the painting, and a stack of books lying across the fold. Scrolling
@@ -1223,7 +1229,7 @@ component App
                       row justify-content="center" align-items="center" flex-wrap="wrap" gap=8 testId="player-credit"
                         if audiobook.public
                           image "symbol:people" color="light-dark(#b5b2aa, #b5b2aa)" aria-label="Shared publicly" font-size="0.8125rem" testId="player-shared"
-                        text readBy(audiobook.voice, audiobook.by) font-size="0.8125rem" color="light-dark(#b5b2aa, #b5b2aa)" text-align="center"
+                        text creditOf(narratedBy(audiobook.voiceName, audiobook.model), audiobook.by) font-size="0.8125rem" color="light-dark(#b5b2aa, #b5b2aa)" text-align="center" testId="narrated-by"
                   // Being prepared, or couldn't be: no chapters yet.
                   if audiobook.status != "ready"
                     row gap=12 align-items="center" justify-content="center" padding="18px 20px" border-radius=30 backgroundMaterial="glass" testId="preparing"

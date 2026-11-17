@@ -16,7 +16,7 @@ import { checkedAddresses, fetchLink, LinkRefused, linkURL } from './link.ts';
 import { liveFile, liveOf } from './live.ts';
 import { bookMeta, parseBook } from './parse.ts';
 import { keep, type Kept, take } from './kept.ts';
-import { listModels } from './tts.ts';
+import { listModels, modelLabel } from './tts.ts';
 import { audioType, audioURL, coverPath, coverType, coverURL, saveCover, validateAudioFile, validateCoverFile } from './storage.ts';
 import { listVoices } from './fish.ts';
 import { keepPlace, placeFrom, placeJson, placesOf, type PlaceRow } from './places.ts';
@@ -338,15 +338,17 @@ const server = Bun.serve({ hostname, port, maxRequestBodySize: 50 * 1024 * 1024,
   } },
 
   // One audiobook to play: anyone's shared one, or the signed-in person's own private one (any
-  // other answers 404). Its chapters and narrated tracks; asked with an account, how many chapters
-  // that account has waiting or narrating (`mine`, of `limit`) and whether it is theirs (`owner`).
+  // other answers 404). Who narrates it (`voiceName`, empty for the model's own voice) and with
+  // which model (`model`, its shown name); its chapters and narrated tracks; asked with an account,
+  // how many chapters that account has waiting or narrating (`mine`, of `limit`) and whether it is
+  // theirs (`owner`).
   '/generations/:id': { OPTIONS: preflight,
     GET: (req) => {
       const g = visible(req, Number(req.params.id));
       if (!g) return noSuch();
       const me = userOf(req);
       return send({ id: String(g.id), title: g.title, author: g.author, cover: coverOf(g), by: g.made_by, voice: voiceOf(g),
-        public: g.public === 1, status: g.status, done: g.done, total: g.total, active: activeOf(g.id), error: g.error,
+        voiceName: g.voice_name ?? '', model: modelLabel(g.model), public: g.public === 1, status: g.status, done: g.done, total: g.total, active: activeOf(g.id), error: g.error,
         chapters: chaptersJson(g), tracks: tracksOf(g.id).map((t) => ({ idx: t.idx, title: t.title, src: audioSrc(g, t.file) })),
         signedIn: me != null, mine: me ? activeFor(me.id) : 0, limit: MAX_ACTIVE, owner: me != null && g.user_id === me.id });
     },

@@ -61,6 +61,8 @@ test "an audiobook lists its chapters: the first narrated, the others waiting fo
   clock +100
   clock data
   expect text "now-playing" == "Chapter One: The Harbour"
+  // Under the title and author: who narrates it. The sample has no named voice, so just the model.
+  expect text "narrated-by" == "Narrated by Silence · ada"
   expect tree has "toggle"
   expect tree missing "generate-0"
   expect tree has "generate-1"

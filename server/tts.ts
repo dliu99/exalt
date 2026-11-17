@@ -33,6 +33,15 @@ let knownUntil = 0;
 const pinned = () => (process.env.TTS_MODELS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   .map((s) => { const [id, name] = s.split('='); return { id, name: name ?? id, voices: [] as string[] }; });
 
+// A model's name to show a listener ("Narrated by Ada (Fish S2.1 Pro)"): its name in the
+// server's list, without "(free)" and with Fish Audio as just Fish; a model no longer listed is
+// named by its id.
+export function modelLabel(id: string): string {
+  const listed = [FAKE, ...pinned(), ...DEFAULTS].find((m) => m.id === id)?.name;
+  const name = listed && listed !== id ? listed : (id.split('/').pop() ?? id).replace(/:free$/, '');
+  return name.split(' (')[0].replace(/^Fish Audio /, 'Fish ').trim();
+}
+
 // The chosen models, with the voices the provider lists for each (empty: the model picks). The
 // offline server has silence, and with TTS_BASE_URL (a test's own provider) TTS_MODELS too.
 export async function listModels(offline: boolean): Promise<Model[]> {
