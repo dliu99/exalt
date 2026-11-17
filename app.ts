@@ -14,6 +14,8 @@ const SESSION = 'exalt.session';
 const PLACES = 'exalt.places';
 const VOICE = 'exalt.voice';
 const GOOGLE_NATIVE = 'exalt.google';
+// Set when a developer's session (DEV_SIGN_IN) signs out: the door stays shut until a sign-in button is pressed.
+const DEV_OUT = 'exalt.dev-out';
 // Downloaded chapters, a folder per audiobook: `<idx>.<ext>` beside `book.json`, the audiobook as it was.
 const OFFLINE = 'app:/cache/offline';
 // Sign in with Apple's web client (a Services ID whose return URL is ${API}/sign-in/return).
@@ -23,7 +25,7 @@ const APP_CALLBACK = 'app.exalt.audiobooks:/signed-in';
 // The iOS client's callback: its "iOS URL scheme" in Google's console, the reversed client ID.
 const GOOGLE_IOS_URL_SCHEME: string = import.meta.env.GOOGLE_IOS_URL_SCHEME ?? 'com.googleusercontent.apps.exalt-ios';
 const GOOGLE_IOS_CALLBACK = `${GOOGLE_IOS_URL_SCHEME}:/oauth2redirect`;
-export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`,
+export const grants = [`net.fetch ${API}`, 'fs.read app:/tmp/picked', `secret.keep ${SESSION}`, `secret.keep ${PLACES}`, `secret.keep ${VOICE}`, `secret.keep ${DEV_OUT}`,
   // Downloads, and the notice that a chapter asked for is narrated.
   `fs.read ${OFFLINE}`, `fs.write ${OFFLINE}`, 'device.notifications purpose.notifications',
   `auth.google ${GOOGLE_WEB_CLIENT_ID}`, `auth.google ${GOOGLE_IOS_CLIENT_ID}`,
@@ -67,7 +69,7 @@ type Kind = { kind?: string; code?: string };
 
 // The session the server answered at sign-in: its bearer token and the name to show. The view
 // sees only whether there is one and the name.
-type Session = { token: string; name: string };
+type Session = { token: string; name: string; dev?: boolean };
 const session = (store: Store): Session | null => {
   try { return JSON.parse(store.get(SESSION) ?? 'null'); } catch { return null; }
 };
@@ -155,7 +157,19 @@ async function signInApple(store: Store) {
   }
 }
 
+// A loopback server with DEV_SIGN_IN=1 signs a developer in with no provider; anywhere else the route is 404.
+async function devSignIn(store: Store) {
+  const res = await fetch(`${API}/sign-in/dev`, { method: 'POST', exactTimeout: 4000 }).catch(() => null);
+  const done = res?.ok ? ((await res.json().catch(() => ({}))) as Record<string, unknown>) : null;
+  if (!done?.ok) return false;
+  store.forget(DEV_OUT);
+  store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || 'Developer'), dev: true }));
+  return true;
+}
+
 async function signInWith(store: Store, name: 'google' | 'apple') {
+  // A developer who signed out comes back in through the door's button, as a person would.
+  if (store.get(DEV_OUT) && await devSignIn(store)) return { ok: true, error: '' };
   if (!onWeb()) return name === 'apple' ? signInApple(store) : signInNative(store);
   if (name === 'apple') return { ok: false, error: '' };
   const asked = ready;
@@ -186,6 +200,8 @@ async function signInWith(store: Store, name: 'google' | 'apple') {
 
 async function signOut(store: Store) {
   const headers = bearer(store);
+  // A developer's session would sign straight back in on the next look; it waits for the door's button.
+  if (session(store)?.dev) store.set(DEV_OUT, '1');
   store.forget(SESSION);
   // The next sign-in shows the provider's sheet rather than signing straight back in.
   await preventSilentAccess().catch(() => {});
@@ -312,11 +328,7 @@ const NO_AUDIOBOOK: Audiobook = { id: '', title: '', author: '', cover: '', by: 
 
 const sources: Sources = {
   currentAccount: async (_a, store) => {
-    if (!session(store)) {
-      const res = await fetch(`${API}/sign-in/dev`, { method: 'POST', exactTimeout: 4000 }).catch(() => null);
-      const done = res?.ok ? ((await res.json().catch(() => ({}))) as Record<string, unknown>) : null;
-      if (done?.ok) store.set(SESSION, JSON.stringify({ token: String(done.token), name: String(done.name || 'Developer') }));
-    }
+    if (!session(store) && !store.get(DEV_OUT)) await devSignIn(store);
     const s = session(store);
     return { signedIn: s != null, name: s?.name ?? '' };
   },

@@ -258,9 +258,12 @@ component App
   derive paintLeft = wide ? (viewport.width - paintW) / 2 : max(viewport.width - paintW, min(0, viewport.width * 0.86 - paintW * 0.83))
   // The app opens on signing in; the site lets anyone through to listen.
   resource app = isApp() as shape Reply else empty(ok=false, error="")
-  // The door: where the server keeps accounts, nothing opens without signing in, on the site as in the app.
+  // The door. The app needs an account, always: signed out, the lander and its door are all there is.
+  // The site follows the server (accountRequired()): where it keeps accounts and Google can sign in,
+  // Home and Add need one; anyone can listen to what is shared.
   resource door = accountRequired() as shape Reply else empty(ok=true, error="")
-  derive gated = door.ok and not account.signedIn and identities.providers.google.active
+  derive needsAccount = app.ok or (door.ok and identities.providers.google.active)
+  derive gated = needsAccount and not account.signedIn
   // On a phone the door is a plain screen of its own: no painting, no wordmark.
   derive phoneDoor = gated and not wide
   // The account: the provider's buttons sign in, with a nonce fetched before the press.
@@ -448,8 +451,11 @@ component App
   // In the app, signing in opens the library, and signing out comes back to the door.
   task entering when app.ok and account.signedIn and top(nav).name == "lander"
     after(1, enter)
-  // The site bars only what needs an account; anyone can listen to what is shared.
-  task barring when gated and top(nav).name != "lander" and (app.ok or top(nav).name == "home" or top(nav).name == "add")
+  // Signed out, the app bars every screen past the door (a deep link, Back, a stale stack); the
+  // site bars only what needs an account, and anyone can listen to what is shared. It waits for
+  // the account's answer, so a signed-in person's link is not turned away while it loads.
+  derive barred = gated and not pending(account) and top(nav).name != "lander" and (app.ok or top(nav).name == "home" or top(nav).name == "add")
+  task barring when barred
     after(1, toDoor)
 
   action getNonce
@@ -531,8 +537,9 @@ component App
     // The app's sign-in sheet, if it is still up.
     if app.ok
       close("door-sheet")
+    // Home is the stack's root: going there drops the door, so Back can't return to it.
     if top(nav).name == "lander"
-      nav = push(nav, path("home"))
+      nav = go(nav, path("home"))
   action toDoor
     nav = go(nav, path("lander"))
   // A book on the stack opens the app.
@@ -944,6 +951,10 @@ component App
                   background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.9) 0%, rgba(250,250,252,0) 100%)"
                 view position="absolute" left="40%" bottom="-45%" width="60%" height="95%"
                   background-image="radial-gradient(ellipse closest-side, rgba(250,250,252,0.85) 0%, rgba(250,250,252,0) 100%)"
+            // The app's door has no way back: its Back control is declared and disabled, which refuses the
+            // edge swipe and Android's Back (Home lies beneath it in the stack).
+            if gated and app.ok
+              button id="back" press=back disabled=true aria-label="Back" aria-hidden="true" tabindex=-1 testId="door-no-back" position="absolute" top=0 left=0 width="0.0625rem" height="0.0625rem" overflow="hidden" opacity=0 pointer-events="none"
             // On a phone the door is its own screen: the painting, the line, and one glass button.
             if phoneDoor
               column position="absolute" inset=0 box-sizing="border-box" justify-content="space-between" testId="door"
