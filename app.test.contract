@@ -33,6 +33,13 @@ test "an empty library is blank covers and a +; signed out, the + asks to sign i
   expect tree has "account-sheet"
   expect state pendingAuth == "import"
 
+test "an import starts private: sharing is turned on in Add a Book, and asks for the right to share"
+  at "/import"
+  clock data
+  clock settle
+  expect state share == false
+  expect state rights == false
+
 test "Add a Book is a box to upload into, Paste link, Z-Library and LibGen; nothing else until a book is chosen"
   at "/import"
   clock data
@@ -69,6 +76,25 @@ test "an audiobook lists its chapters: the first narrated, the others waiting fo
   expect tree has "generate-2"
   expect tree missing "delete"
   expect tree missing "in-progress"
+
+// Signed out, Home is the feed alone: what others shared, as covers with no word over them.
+test "Home's feed shows what others shared, and a tap on a cover plays it"
+  at "/home"
+  size 390x844
+  clock data
+  clock settle
+  expect tree has "feed"
+  expect tree has "shared-1"
+  expect tree missing "feed-title"
+  expect tree missing "library-empty"
+  expect tree missing "library"
+  tap "shared-1"
+  clock data
+  clock settle
+  expect tree has "player"
+  expect state loaded == "1"
+  expect state held == false
+  expect text "now-playing" == "Chapter One: The Harbour"
 
 test "signed out, a chapter's Generate opens the sheet, and closing it carries nothing on"
   at "/play/1"
@@ -274,3 +300,28 @@ test "a book imported by link is split into chapters; a link to a private addres
   clock data
   // grace's own audiobook of the same link is 2; nothing was made of the refused ones.
   expect text "now-playing" == "Chapter One: The Harbour"
+
+// After the import above: lin's private import of the same link is audiobook 3. A private one
+// stays out of the feed; shared (with the right confirmed) it joins it, and made private, leaves.
+test "the feed has only what is shared: sharing needs the right confirmed, and Make Private takes it out"
+  at "/home"
+  request POST "/audiobooks?model=exalt%2Fsilence&public=0&link=https%3A%2F%2Fbooks.example%2Fa-quiet-harbour.txt" as lin
+  clock +1500 real
+  reload
+  clock data
+  clock settle
+  expect tree has "shared-1"
+  expect tree has "shared-2"
+  expect tree missing "shared-3"
+  request PATCH "/me/audiobooks/3" {"public": true} as lin expect 400
+  request PATCH "/me/audiobooks/3" {"public": true, "rights": true} as lin
+  reload
+  clock data
+  clock settle
+  expect tree has "shared-3"
+  request PATCH "/me/audiobooks/3" {"public": false} as lin
+  reload
+  clock data
+  clock settle
+  expect tree missing "shared-3"
+  expect tree has "shared-1"
